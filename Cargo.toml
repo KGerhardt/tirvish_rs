@@ -1,0 +1,19 @@
+[package]
+name = "tirvish_rs"
+version = "0.0.1"
+edition = "2021"
+description = "Faithful Rust port of gt tirvish (genometools 1.6.5) — independent of grf_rs"
+
+[dependencies]
+# SA construction over the integer mirror alphabet. openmp disabled (single
+# -threaded; avoids the libomp build dependency). LCP is computed via Kasai
+# (src/sa.rs), not libsais, so the large-alphabet text isn't needed post-SA.
+libsais = { version = "0.2", default-features = false }
+
+[[bin]]
+name = "tirvish_rs"
+path = "src/main.rs"
+
+[lib]
+name = "tirvish_rs"
+path = "src/lib.rs"
