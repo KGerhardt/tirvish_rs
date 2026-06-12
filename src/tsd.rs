@@ -59,19 +59,34 @@ fn cmp_suffix(db: &[u32], a: usize, b: usize) -> Ordering {
 
 /// gt_querysubstringmatch: left-maximal exact matches (len >= minlen) of db vs
 /// query, in (query-offset asc, db-suffix SA order). Stored as gt_tir_store_TSDs.
-fn enumerate_tsds(db: &[u32], query: &[u32], minlen: usize, left_start: u64, right_start: u64) -> Vec<Tsd> {
-    let mut out = Vec::new();
+///
+/// Fills the caller-provided `out`/`matches` scratch (cleared on entry) instead
+/// of allocating, so the ~4.8M per-seed calls produce no heap churn — eliminating
+/// the glibc arena creep that otherwise grows loop RSS over the run. Same pattern
+/// as the xdrop/greedyedist thread_local front buffers.
+fn enumerate_tsds_into(
+    out: &mut Vec<Tsd>,
+    matches: &mut Vec<usize>,
+    db: &[u32],
+    query: &[u32],
+    minlen: usize,
+    left_start: u64,
+    right_start: u64,
+) {
+    out.clear();
     let (dblen, qlen) = (db.len(), query.len());
     if dblen < minlen || qlen < minlen {
-        return out;
+        return;
     }
     for offset in 0..=(qlen - minlen) {
         // db positions whose minlen-prefix equals query[offset..offset+minlen]
-        let mut matches: Vec<usize> = (0..=dblen - minlen)
-            .filter(|&b| (0..minlen).all(|m| db[b + m] < ALPHA && db[b + m] == query[offset + m]))
-            .collect();
+        matches.clear();
+        matches.extend(
+            (0..=dblen - minlen)
+                .filter(|&b| (0..minlen).all(|m| db[b + m] < ALPHA && db[b + m] == query[offset + m])),
+        );
         matches.sort_by(|&a, &b| cmp_suffix(db, a, b)); // SA order within the interval
-        for dbstart in matches {
+        for &dbstart in matches.iter() {
             // left-maximal (gt_mmsearch_isleftmaximal)
             let leftmax = dbstart == 0
                 || offset == 0
@@ -101,7 +116,14 @@ fn enumerate_tsds(db: &[u32], query: &[u32], minlen: usize, left_start: u64, rig
             });
         }
     }
-    out
+}
+
+thread_local! {
+    // Per-thread TSD scratch: `out` collects the stored TSDs, `matches` the
+    // per-offset db hit list. Reused across the ~4.8M per-seed calls (cleared
+    // each call) so stage 3 does zero per-seed heap allocation.
+    static TSD_OUT: std::cell::RefCell<Vec<Tsd>> = std::cell::RefCell::new(Vec::new());
+    static TSD_MATCHES: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(Vec::new());
 }
 
 /// gt_tir_find_best_TSD: pick the minimal-cost TSD (strict `<` => first wins),
@@ -194,8 +216,16 @@ pub fn search_for_tsds(
     if min_tsd > 1 {
         let db = &enc[start_left as usize..=end_left as usize];
         let query = &enc[start_right as usize..=end_right as usize];
-        let tsds = enumerate_tsds(db, query, min_tsd as usize, start_left, start_right);
-        find_best_tsd(&tsds, pair, min_tsd, max_tsd);
+        TSD_OUT.with(|out| {
+            TSD_MATCHES.with(|matches| {
+                let mut out = out.borrow_mut();
+                let mut matches = matches.borrow_mut();
+                enumerate_tsds_into(
+                    &mut out, &mut matches, db, query, min_tsd as usize, start_left, start_right,
+                );
+                find_best_tsd(&out, pair, min_tsd, max_tsd);
+            });
+        });
     }
 }
 

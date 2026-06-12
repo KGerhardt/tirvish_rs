@@ -46,6 +46,7 @@ fn compare_tirs(a: &TirPair, b: &TirPair) -> Ordering {
 struct Collected {
     live: Vec<(u32, TirPair)>,
     p0: Option<(u32, TirPair)>,
+    n_pass: u64, // count of length-passers (live + skipped); diagnostic
 }
 
 /// gt_tir_remove_overlaps, "best" mode (keep max-similarity per overlapping
@@ -221,6 +222,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
                 process_seed(s, &e, &scores, &dist, timeit, &a_xdrop, &a_tsd, &a_sim)
             {
                 let idx = i as u32;
+                acc.n_pass += 1;
                 // p0 = argmin over ALL length-passers (skipped or not) by
                 // (compare_tirs, seed_index) = gt's pairs[0].
                 let beats = match &acc.p0 {
@@ -238,6 +240,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         })
         .reduce(Collected::default, |mut a, mut b| {
             a.live.append(&mut b.live);
+            a.n_pass += b.n_pass;
             a.p0 = match (a.p0, b.p0) {
                 (None, x) | (x, None) => x,
                 (Some(x), Some(y)) => {
@@ -254,6 +257,16 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         d_xdrop = std::time::Duration::from_nanos(a_xdrop.load(AtomicOrdering::Relaxed));
         d_tsd = std::time::Duration::from_nanos(a_tsd.load(AtomicOrdering::Relaxed));
         d_sim = std::time::Duration::from_nanos(a_sim.load(AtomicOrdering::Relaxed));
+    }
+
+    if timeit {
+        eprintln!(
+            "RSCOUNT seeds={} length_passers={} live(sim>=80)={} skipped={}",
+            seeds.len(),
+            collected.n_pass,
+            collected.live.len(),
+            collected.n_pass - collected.live.len() as u64,
+        );
     }
 
     // stage 5: sort the live survivors (compare_tirs, then seed index to match the
