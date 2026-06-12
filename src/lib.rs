@@ -47,6 +47,7 @@ pub mod sa;
 pub mod seeds;
 pub mod similarity;
 pub mod tsd;
+pub mod twobit;
 pub mod xdrop;
 
 // Stage modules land here as the port progresses (Phase A):

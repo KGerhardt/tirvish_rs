@@ -10,8 +10,8 @@
 //! (revcomp already stored). sim = 100*(1 - edist/max(ulen,vlen)); the pair is
 //! skipped iff sim is (strictly, epsilon-aware) below the threshold.
 
-use crate::encode::ALPHA;
 use crate::tsd::TirPair;
+use crate::twobit::TwoBit;
 
 const ABS_ERR: f64 = 1.0e-100; // GT_DBL_MAX_ABS_ERROR
 const REL_ERR: f64 = 1.0e-8; // GT_DBL_MAX_REL_ERROR
@@ -43,27 +43,6 @@ pub fn double_smaller(d1: f64, d2: f64) -> bool {
     double_compare(d1, d2) < 0
 }
 
-/// gt_seqabstract_lcp(forward=true, ...): matching run, breaks at a special.
-fn fwd_lcp(useq: &[u32], vseq: &[u32], u: usize, v: usize) -> usize {
-    let maxlen = (useq.len() - u).min(vseq.len() - v);
-    let mut l = 0;
-    while l < maxlen {
-        let uc = useq[u + l];
-        if uc >= ALPHA {
-            break;
-        }
-        let vc = vseq[v + l];
-        if vc >= ALPHA {
-            break;
-        }
-        if uc != vc {
-            break;
-        }
-        l += 1;
-    }
-    l
-}
-
 // gt: frontspecparms — (left, width) for distance p, parameter r.
 fn frontspecparms(ulen: i64, vlen: i64, p: i64, r: i64) -> (i64, i64) {
     if r <= 0 {
@@ -85,10 +64,12 @@ fn access(fs: &[i64], offset: i64, left: i64, width: i64, k: i64, imin: i64) -> 
     }
 }
 
-/// gt: greedyunitedist — exact unit (Levenshtein) edit distance of useq vs vseq.
-pub fn greedy_unit_edist(useq: &[u32], vseq: &[u32]) -> u64 {
-    let ulen = useq.len() as i64;
-    let vlen = vseq.len() as i64;
+/// gt: greedyunitedist — exact unit (Levenshtein) edit distance of the two arms,
+/// each given as an absolute start position into the 2-bit mirror genome plus a
+/// length. All matching runs use the SWAR LCE (forward).
+pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: usize, vlen_u: usize) -> u64 {
+    let ulen = ulen_u as i64;
+    let vlen = vlen_u as i64;
     let imin = -(ulen.max(vlen));
     let mut fs: Vec<i64> = vec![0];
 
@@ -96,7 +77,7 @@ pub fn greedy_unit_edist(useq: &[u32], vseq: &[u32]) -> u64 {
     fs[0] = if ulen == 0 || vlen == 0 {
         0
     } else {
-        fwd_lcp(useq, vseq, 0, 0) as i64
+        tb.lce(true, u_start, v_start, ulen_u.min(vlen_u)) as i64
     };
     if ulen == vlen && fs[0] == vlen {
         return 0;
@@ -131,7 +112,8 @@ pub fn greedy_unit_edist(useq: &[u32], vseq: &[u32]) -> u64 {
                 } else {
                     let mut tt = t;
                     if ulen != 0 && vlen != 0 && tt < ulen && tt + k < vlen {
-                        tt += fwd_lcp(useq, vseq, tt as usize, (tt + k) as usize) as i64;
+                        let maxlen = ((ulen - tt).min(vlen - (tt + k))) as usize;
+                        tt += tb.lce(true, u_start + tt as usize, v_start + (tt + k) as usize, maxlen) as i64;
                     }
                     if tt > ulen || tt + k > vlen {
                         imin
@@ -159,12 +141,16 @@ pub fn greedy_unit_edist(useq: &[u32], vseq: &[u32]) -> u64 {
 
 /// gt: the similarity block. Computes ulen/vlen/edist/similarity on `pair`,
 /// sets skip if below threshold. Returns (ulen, vlen, edist) for validation.
-pub fn compute_similarity(pair: &mut TirPair, enc: &[u32], threshold: f64) -> (u64, u64, u64) {
+pub fn compute_similarity(pair: &mut TirPair, tb: &TwoBit, threshold: f64) -> (u64, u64, u64) {
     let ulen = pair.left_tir_end - pair.left_tir_start;
     let vlen = pair.right_tir_end - pair.right_tir_start;
-    let useq = &enc[pair.left_tir_start as usize..(pair.left_tir_start + ulen) as usize];
-    let vseq = &enc[pair.right_tir_start as usize..(pair.right_tir_start + vlen) as usize];
-    let edist = greedy_unit_edist(useq, vseq);
+    let edist = greedy_unit_edist(
+        tb,
+        pair.left_tir_start as usize,
+        pair.right_tir_start as usize,
+        ulen as usize,
+        vlen as usize,
+    );
     pair.similarity = 100.0 * (1.0 - edist as f64 / ulen.max(vlen) as f64);
     if double_smaller(pair.similarity, threshold) {
         pair.skip = true;

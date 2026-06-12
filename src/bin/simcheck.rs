@@ -87,7 +87,7 @@ fn main() {
             continue;
         }
         // reaches the similarity computation (gt dumps PAIR here)
-        let (ulen, vlen, edist) = compute_similarity(&mut pair, &e.enc, params::SIMILARITY_THRESHOLD);
+        let (ulen, vlen, edist) = compute_similarity(&mut pair, &e.twobit, params::SIMILARITY_THRESHOLD);
         reached += 1;
         out.push_str(&format!(
             "P\tp1={}\tp2={}\tslen={}\tulen={}\tvlen={}\tedist={}\tsim={:.2}\n",

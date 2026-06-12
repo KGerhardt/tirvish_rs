@@ -127,7 +127,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         }
         if !pair.skip {
             let ts = std::time::Instant::now();
-            compute_similarity(&mut pair, &e.enc, params::SIMILARITY_THRESHOLD);
+            compute_similarity(&mut pair, &e.twobit, params::SIMILARITY_THRESHOLD);
             d_sim += ts.elapsed();
         }
         pairs.push(pair);

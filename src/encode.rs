@@ -42,6 +42,7 @@ pub struct Encoded {
     pub seqnum_of: Vec<u32>,  // per-position seqnum; u32::MAX at separators
     pub fwd_seqstart: Vec<u64>, // forward contig start positions (len = input contigs)
     pub fwd_seqlen: Vec<u64>,   // forward contig lengths
+    pub twobit: crate::twobit::TwoBit, // 2-bit packed mirror genome for SWAR LCE
 }
 
 impl Encoded {
@@ -124,6 +125,7 @@ pub fn encode(contigs: &[(String, Vec<u8>)]) -> Encoded {
 
     let total_logical = sa_input.len() as u64;
     let midpos = (total_logical - 1) / 2;
+    let twobit = crate::twobit::TwoBit::from_enc(&enc, ALPHA);
     Encoded {
         sa_input,
         enc,
@@ -135,5 +137,6 @@ pub fn encode(contigs: &[(String, Vec<u8>)]) -> Encoded {
         seqnum_of,
         fwd_seqstart,
         fwd_seqlen,
+        twobit,
     }
 }
