@@ -30,8 +30,42 @@ pub struct Element {
     pub sim: f64,
 }
 
+/// Compact projection of a TirPair retained for stage 5 (sort + overlap removal +
+/// emission). Drops the compute-only fields (pos1/pos2/seed_len and the mirror
+/// coords right_tir_start/end) that stages 2-4 needed but stage 5 never reads.
+/// 64 B vs TirPair's 104 B; with ~3.67M live candidates on a shrimp chunk this is
+/// the dominant memory term. `seed_idx` carries the stable-sort tie-break.
+#[derive(Clone, Copy)]
+struct LeanPair {
+    seed_idx: u32,
+    contignumber: u32,
+    left_tir_start: u64,
+    left_tir_end: u64,
+    right_transformed_start: u64,
+    right_transformed_end: u64,
+    tsd_length: u64,
+    similarity: f64,
+    skip: bool,
+}
+
+impl LeanPair {
+    fn from_pair(seed_idx: u32, p: &TirPair) -> Self {
+        LeanPair {
+            seed_idx,
+            contignumber: p.contignumber,
+            left_tir_start: p.left_tir_start,
+            left_tir_end: p.left_tir_end,
+            right_transformed_start: p.right_transformed_start,
+            right_transformed_end: p.right_transformed_end,
+            tsd_length: p.tsd_length,
+            similarity: p.similarity,
+            skip: p.skip,
+        }
+    }
+}
+
 /// gt_tir_compare_TIRs.
-fn compare_tirs(a: &TirPair, b: &TirPair) -> Ordering {
+fn compare_tirs(a: &LeanPair, b: &LeanPair) -> Ordering {
     a.contignumber
         .cmp(&b.contignumber)
         .then(a.left_tir_start.cmp(&b.left_tir_start))
@@ -44,8 +78,8 @@ fn compare_tirs(a: &TirPair, b: &TirPair) -> Ordering {
 /// itself be skipped. See [`remove_overlaps_pruned`] for why only `p0` matters.
 #[derive(Default)]
 struct Collected {
-    live: Vec<(u32, TirPair)>,
-    p0: Option<(u32, TirPair)>,
+    live: Vec<LeanPair>,
+    p0: Option<LeanPair>,
     n_pass: u64, // count of length-passers (live + skipped); diagnostic
 }
 
@@ -66,9 +100,9 @@ struct Collected {
 /// maxsim that the first overlapping live pair always replaces. When `p0` is
 /// live it equals `pairs[0]` (global min, present in the live set), so it seeds
 /// from index 0 and the loop starts at 1, exactly as gt does.
-fn remove_overlaps_pruned(pairs: &mut [TirPair], p0: Option<&(u32, TirPair)>) {
+fn remove_overlaps_pruned(pairs: &mut [LeanPair], p0: Option<&LeanPair>) {
     let p0 = match p0 {
-        Some(p) => &p.1,
+        Some(p) => p,
         None => return, // no length-passers at all
     };
     let mut ref_start = p0.left_tir_start;
@@ -168,25 +202,31 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     let mut d_tsd = std::time::Duration::ZERO;
     let mut d_sim = std::time::Duration::ZERO;
 
-    let e = encode(contigs);
+    let mut e = encode(contigs);
     let nsuf = e.num_suffixes();
-    // Build u64 suftab/lcptab in a scope so the i32 SA+LCP (~2*T*4 bytes — a
-    // duplicate of the data we just copied out) are freed before the seed loop,
-    // rather than lingering for the whole run.
-    let (suftab, lcptab) = {
-        let (sa, lcp) = sa_lcp(&e.sa_input, e.k);
-        let suftab: Vec<u64> = sa[..nsuf].iter().map(|&x| x as u64).collect();
-        let lcptab: Vec<u64> = lcp[..nsuf].iter().map(|&x| x as u64).collect();
-        (suftab, lcptab)
-    };
 
+    // Stage 1: SA/LCP -> maxpairs -> store_seed. ALL the SA scaffolding is dead
+    // once `seeds` is built — the per-seed loop only reads e.enc/e.twobit + contig
+    // metadata — so free each piece as soon as its last reader finishes: the i32
+    // SA+LCP (inner scope), e.sa_input (after SA build), suftab/lcptab (after
+    // maxpairs), e.seqnum_of (after store_seed). Keeps the loop's peak off them.
     let mut seeds: Vec<Seed> = Vec::new();
-    enumerate_maxpairs(&suftab, &lcptab, params::SEED, ALPHA, &e.enc, |len, p1, p2| {
-        store_seed(
-            &mut seeds, len, p1, p2, e.midpos, e.total_logical, e.num_contigs,
-            &e.seqnum_of, params::MIN_TIR_DIST, params::MAX_TIR_DIST, params::MAX_TIR_LEN,
-        );
-    });
+    {
+        let (suftab, lcptab) = {
+            let (sa, lcp) = sa_lcp(&e.sa_input, e.k);
+            let suftab: Vec<u64> = sa[..nsuf].iter().map(|&x| x as u64).collect();
+            let lcptab: Vec<u64> = lcp[..nsuf].iter().map(|&x| x as u64).collect();
+            (suftab, lcptab)
+        }; // i32 sa/lcp freed
+        e.sa_input = Vec::new(); // SA built; libsais text no longer needed (~T*4 B)
+        enumerate_maxpairs(&suftab, &lcptab, params::SEED, ALPHA, &e.enc, |len, p1, p2| {
+            store_seed(
+                &mut seeds, len, p1, p2, e.midpos, e.total_logical, e.num_contigs,
+                &e.seqnum_of, params::MIN_TIR_DIST, params::MAX_TIR_DIST, params::MAX_TIR_LEN,
+            );
+        });
+    } // suftab/lcptab freed
+    e.seqnum_of = Vec::new(); // only store_seed read it (~T*4 B)
 
     let t_stage1 = t_start.elapsed();
     let scores = ArbitraryScores {
@@ -206,8 +246,10 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     // can touch refrng/maxsim — inert and droppable. The one skipped pair that can
     // affect output is the global-first (index-0 seed); keep it separately as `p0`.
     // The seed index (via .enumerate()) reproduces the validated stable-sort tie
-    // -break. Cuts `pairs` from ~all length-passers to a few hundred survivors
-    // (~500 MB -> tens of KB on a 5 Mb chunk). See [`remove_overlaps_pruned`].
+    // -break. Each kept candidate is projected to a compact LeanPair. NOTE most
+    // length-passers PASS similarity (chunk0: 3.67M of 4.57M live), so this drops
+    // the ~20% skipped, not the bulk; the live set is still large and is the
+    // dominant memory term. See [`LeanPair`] / [`remove_overlaps_pruned`].
     //
     // Per-stage timing (TIRVISH_RS_TIME): CPU-time summed across workers via
     // relaxed atomics; with N workers the sum can exceed the loop wall.
@@ -223,17 +265,18 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             {
                 let idx = i as u32;
                 acc.n_pass += 1;
+                let lean = LeanPair::from_pair(idx, &pair);
                 // p0 = argmin over ALL length-passers (skipped or not) by
                 // (compare_tirs, seed_index) = gt's pairs[0].
                 let beats = match &acc.p0 {
                     None => true,
-                    Some((pi, pp)) => compare_tirs(&pair, pp).then(idx.cmp(pi)).is_lt(),
+                    Some(pp) => compare_tirs(&lean, pp).then(idx.cmp(&pp.seed_idx)).is_lt(),
                 };
                 if beats {
-                    acc.p0 = Some((idx, pair.clone()));
+                    acc.p0 = Some(lean);
                 }
                 if !pair.skip {
-                    acc.live.push((idx, pair));
+                    acc.live.push(lean);
                 }
             }
             acc
@@ -244,7 +287,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             a.p0 = match (a.p0, b.p0) {
                 (None, x) | (x, None) => x,
                 (Some(x), Some(y)) => {
-                    if compare_tirs(&x.1, &y.1).then(x.0.cmp(&y.0)).is_lt() {
+                    if compare_tirs(&x, &y).then(x.seed_idx.cmp(&y.seed_idx)).is_lt() {
                         Some(x)
                     } else {
                         Some(y)
@@ -273,12 +316,11 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     // original stable full-array sort), then remove_overlaps seeded from p0.
     let t_after_loop = t_start.elapsed();
     let mut live = collected.live;
-    live.sort_by(|a, b| compare_tirs(&a.1, &b.1).then(a.0.cmp(&b.0)));
-    let mut pairs: Vec<TirPair> = live.into_iter().map(|(_, p)| p).collect();
-    remove_overlaps_pruned(&mut pairs, collected.p0.as_ref());
+    live.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
+    remove_overlaps_pruned(&mut live, collected.p0.as_ref());
 
     let mut out = Vec::new();
-    for pair in &pairs {
+    for pair in &live {
         if pair.skip {
             continue;
         }
