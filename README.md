@@ -26,8 +26,31 @@ tsd2 sim`). Each stage was also validated tuple-for-tuple in gt's own internal
 coordinates (33,776 seeds → 32,061 extended/scored pairs → final elements).
 
 This is the **faithful** port (single-threaded, no algorithmic shortcuts).
-Optimization (banded edit distance, fragment parallelism, alloc reuse) is the
-next phase and must stay validated against this same oracle.
+Optimization (alloc reuse, banded edit distance, 2-bit/XOR comparisons) is the
+next phase and must stay validated against this same oracle. Parallelism is
+deferred to last: it improves wall-clock by spending more compute, whereas the
+goal is reducing CPU-seconds (single-threaded efficiency), which then multiplies
+with any later parallelism.
+
+## Performance (per-stage, chunk0, single-threaded)
+
+Wall seconds for the faithful port vs the instrumented gt 1.6.5 reference, on
+chunk0 (~5.25 Mb, ~5.1 M seeds). Already ~2.7× faster end-to-end **before any
+optimization** — from the Rust constant factor plus a brute-force TSD search
+(gt builds a suffix array per seed; this doesn't).
+
+| stage            | gt                                     | tirvish_rs | speedup |
+|------------------|----------------------------------------|------------|---------|
+| stage 1 (seeds)  | ~32.6 (suffixerator 6 + maxpairs 26.6) | 10.6       | ~3×     |
+| 2 — Xdrop        | 132.7                                  | 98.5       | 1.35×   |
+| 3 — TSD          | 70.6                                   | 19.2       | 3.7×    |
+| 4 — similarity   | 405.7                                  | 93.9       | 4.3×    |
+| 5 — sort+overlap | 1.4                                    | 1.0        | 1.4×    |
+| **total**        | **~611**                               | **224**    | **2.7×**|
+
+Note the dominant stage moved: in gt, similarity is ~66%; in tirvish_rs, Xdrop
+(98.5 s) and similarity (93.9 s) are co-dominant, so optimization weights both.
+(`TIRVISH_RS_TIME=1 ./target/release/tirvish <fa>` prints this breakdown.)
 
 ## Pipeline (gt source → module)
 

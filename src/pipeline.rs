@@ -65,6 +65,13 @@ fn remove_overlaps(pairs: &mut [TirPair]) {
 }
 
 pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
+    // env-gated per-stage timing (TIRVISH_RS_TIME), to compare vs gt's breakdown.
+    let timeit = std::env::var("TIRVISH_RS_TIME").is_ok();
+    let t_start = std::time::Instant::now();
+    let mut d_xdrop = std::time::Duration::ZERO;
+    let mut d_tsd = std::time::Duration::ZERO;
+    let mut d_sim = std::time::Duration::ZERO;
+
     let e = encode(contigs);
     let nsuf = e.num_suffixes();
     let (sa, lcp) = sa_lcp(&e.sa_input, e.k);
@@ -79,6 +86,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         );
     });
 
+    let t_stage1 = t_start.elapsed();
     let scores = ArbitraryScores {
         mat: params::XDROP_MAT, mis: params::XDROP_MIS,
         ins: params::XDROP_INS, del: params::XDROP_DEL,
@@ -90,10 +98,12 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     for s in &seeds {
         let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
         let alilen = params::MAX_TIR_LEN - s.len;
+        let tx = std::time::Instant::now();
         let (xl, xr) = extend_seed(
             &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist,
             params::XDROP_BELOWSCORE,
         );
+        d_xdrop += tx.elapsed();
         let mut pair = match build_pair(
             s.pos1, s.pos2, s.len, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
             e.total_logical, params::MIN_TIR_LEN, params::MAX_TIR_LEN,
@@ -103,10 +113,12 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         };
         let seq_start = e.fwd_seqstart[s.contignumber as usize];
         let seq_len = e.fwd_seqlen[s.contignumber as usize];
+        let tt = std::time::Instant::now();
         search_for_tsds(
             &mut pair, &e.enc, seq_start, seq_len, params::VICINITY,
             params::MIN_TSD_LEN, params::MAX_TSD_LEN,
         );
+        d_tsd += tt.elapsed();
         if !pair.skip
             && (pair.left_tir_end <= pair.left_tir_start
                 || pair.right_tir_end <= pair.right_tir_start)
@@ -114,12 +126,15 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             pair.skip = true;
         }
         if !pair.skip {
+            let ts = std::time::Instant::now();
             compute_similarity(&mut pair, &e.enc, params::SIMILARITY_THRESHOLD);
+            d_sim += ts.elapsed();
         }
         pairs.push(pair);
     }
 
     // stage 5
+    let t_after_loop = t_start.elapsed();
     pairs.sort_by(compare_tirs);
     remove_overlaps(&mut pairs);
 
@@ -153,6 +168,16 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             tsd2: pair.tsd_length,
             sim: pair.similarity,
         });
+    }
+    if timeit {
+        let total = t_start.elapsed();
+        let loop_other = t_after_loop.saturating_sub(t_stage1) - d_xdrop - d_tsd - d_sim;
+        eprintln!(
+            "RSTIME stage1={:.1}s xdrop={:.1}s tsd={:.1}s sim={:.1}s loop_other={:.1}s stage5={:.1}s total={:.1}s",
+            t_stage1.as_secs_f64(), d_xdrop.as_secs_f64(), d_tsd.as_secs_f64(),
+            d_sim.as_secs_f64(), loop_other.as_secs_f64(),
+            (total - t_after_loop).as_secs_f64(), total.as_secs_f64()
+        );
     }
     out
 }
