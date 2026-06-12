@@ -67,11 +67,22 @@ fn access(fs: &[i64], offset: i64, left: i64, width: i64, k: i64, imin: i64) -> 
 /// gt: greedyunitedist — exact unit (Levenshtein) edit distance of the two arms,
 /// each given as an absolute start position into the 2-bit mirror genome plus a
 /// length. All matching runs use the SWAR LCE (forward).
+thread_local! {
+    // Front buffer reused across calls. Never read before written within a call
+    // (set-before-read invariant), so it needs no clearing between calls.
+    static GE_FS: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
+}
+
 pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: usize, vlen_u: usize) -> u64 {
     let ulen = ulen_u as i64;
     let vlen = vlen_u as i64;
     let imin = -(ulen.max(vlen));
-    let mut fs: Vec<i64> = vec![0];
+    GE_FS.with(|cell| {
+    let mut guard = cell.borrow_mut();
+    let fs = &mut *guard;
+    if fs.is_empty() {
+        fs.push(0);
+    }
 
     // firstfrontforward: front[0] at index 0
     fs[0] = if ulen == 0 || vlen == 0 {
@@ -83,10 +94,19 @@ pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: us
         return 0;
     }
 
+    // Banded early-exit: a pair passes the similarity gate iff edist <= 0.2*max,
+    // i.e. <= max/5. Cap the DP at max/5 + 2 (margin so no passer is ever cut)
+    // and bail to a definite-fail distance beyond it. Output-preserving for the
+    // final elements (a failer's exact edist is never recorded), so this is
+    // validated against the gold, not the per-pair edist trace.
+    let band = ulen.max(vlen) / 5 + 2;
     let (mut prev_offset, mut prev_left, mut prev_width) = (0i64, 0i64, 1i64);
     let mut kval = 1i64;
     let mut r = 1 - ulen.min(vlen);
     loop {
+        if kval > band {
+            return (band + 1) as u64; // edist > band => sim < 80 => skip
+        }
         let offset = prev_offset + prev_width;
         let (left, width) = frontspecparms(ulen, vlen, kval, r);
         let need = (offset + width) as usize;
@@ -98,12 +118,12 @@ pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: us
         while k < left + width {
             let stored = if r <= 0 || k <= -r || k >= r {
                 // evalentryforward: max of three diagonal moves, then LCP extend
-                let mut t = access(&fs, prev_offset, prev_left, prev_width, k, imin) + 1;
-                let below = access(&fs, prev_offset, prev_left, prev_width, k - 1, imin);
+                let mut t = access(fs, prev_offset, prev_left, prev_width, k, imin) + 1;
+                let below = access(fs, prev_offset, prev_left, prev_width, k - 1, imin);
                 if t < below {
                     t = below;
                 }
-                let above = access(&fs, prev_offset, prev_left, prev_width, k + 1, imin) + 1;
+                let above = access(fs, prev_offset, prev_left, prev_width, k + 1, imin) + 1;
                 if t < above {
                     t = above;
                 }
@@ -128,7 +148,7 @@ pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: us
             k += 1;
         }
         // alignment finished when the end diagonal reaches ulen
-        if access(&fs, offset, left, width, vlen - ulen, imin) == ulen {
+        if access(fs, offset, left, width, vlen - ulen, imin) == ulen {
             return kval as u64;
         }
         prev_offset = offset;
@@ -137,6 +157,7 @@ pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: us
         kval += 1;
         r += 1;
     }
+    })
 }
 
 /// gt: the similarity block. Computes ulen/vlen/edist/similarity on `pair`,

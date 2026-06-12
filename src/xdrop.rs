@@ -113,6 +113,11 @@ fn frontidx(d: i64, k: i64) -> usize {
 /// gt: gt_evalxdroparbitscoresextend (xdrop.c:224-431). `forward` is gt's
 /// `rightextension`. Returns the best-scoring extension; ivalue/jvalue are how
 /// far it reached in useq/vseq.
+thread_local! {
+    static XDROP_SCRATCH: std::cell::RefCell<(Vec<i64>, Vec<u8>, Vec<i64>)> =
+        std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new()));
+}
+
 pub fn eval_xdrop(
     forward: bool,
     useq: &[u32],
@@ -136,9 +141,12 @@ pub fn eval_xdrop(
     let allowed_mininf = dmis.max(dins).max(ddel) - 1;
     let eval = |k_anti: i64, d: i64| k_anti * mat_half - d * gcd;
 
-    // fronts indexed by frontidx(d,k); row + direction. Grown on set.
-    let mut fr: Vec<i64> = Vec::new();
-    let mut fd: Vec<u8> = Vec::new();
+    XDROP_SCRATCH.with(|cell| {
+    let mut guard = cell.borrow_mut();
+    let (fr, fd, big_t) = &mut *guard;
+    big_t.clear();
+    // fronts indexed by frontidx(d,k); reused across calls (set-before-read, so
+    // stale data is always overwritten before it could be read).
     let mut set_front = |d: i64, k: i64, row: i64, dir: u8, fr: &mut Vec<i64>, fd: &mut Vec<u8>| {
         let idx = frontidx(d, k);
         if idx >= fr.len() {
@@ -148,7 +156,6 @@ pub fn eval_xdrop(
         fr[idx] = row;
         fd[idx] = dir;
     };
-    let mut big_t: Vec<i64> = Vec::new();
     let mut best = XdropBest::default();
 
     let mut currd: i64 = 0;
@@ -165,7 +172,7 @@ pub fn eval_xdrop(
         ubound = 0;
     }
     let mut tmp_dir: u8 = 0;
-    set_front(0, 0, idx0, tmp_dir, &mut fr, &mut fd);
+    set_front(0, 0, idx0, tmp_dir, fr, fd);
     let mut bigt_tmp = eval(idx0 + idx0, 0);
     best.score = bigt_tmp;
     best.ivalue = idx0 as u64;
@@ -257,7 +264,7 @@ pub fn eval_xdrop(
                     tmp_row = fr[frontidx(currd - 1, k)];
                 }
             }
-            set_front(currd, k, tmp_row, tmp_dir, &mut fr, &mut fd);
+            set_front(currd, k, tmp_row, tmp_dir, fr, fd);
             k += 1;
         }
         if always_mininf {
@@ -273,12 +280,12 @@ pub fn eval_xdrop(
         // fill out-of-bounds fronts with integermin (gt does this too)
         let mut kk = -currd;
         while kk < lbound - 1 {
-            set_front(currd, kk, integermin, tmp_dir, &mut fr, &mut fd);
+            set_front(currd, kk, integermin, tmp_dir, fr, fd);
             kk += 1;
         }
         let mut kk = ubound + 2;
         while kk <= currd {
-            set_front(currd, kk, integermin, tmp_dir, &mut fr, &mut fd);
+            set_front(currd, kk, integermin, tmp_dir, fr, fd);
             kk += 1;
         }
         // alignment finished
@@ -323,6 +330,7 @@ pub fn eval_xdrop(
         }
     }
     best
+    })
 }
 
 /// Per-seed left (reverse) + right (forward) extension, mirroring
