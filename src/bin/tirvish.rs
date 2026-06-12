@@ -3,32 +3,12 @@
 //! oracle (seqid, start) so it diffs directly against gold/chunkN.gold.tsv.
 //! Usage: tirvish <fasta>
 
-use std::fs;
 use tirvish_rs::pipeline::run;
 
-fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
-    let data = fs::read_to_string(path).expect("read fasta");
-    let mut out = Vec::new();
-    let (mut name, mut seq) = (String::new(), Vec::new());
-    for line in data.lines() {
-        if let Some(h) = line.strip_prefix('>') {
-            if !name.is_empty() {
-                out.push((std::mem::take(&mut name), std::mem::take(&mut seq)));
-            }
-            name = h.to_string();
-        } else {
-            seq.extend(line.bytes().map(|b| b.to_ascii_uppercase()));
-        }
-    }
-    if !name.is_empty() {
-        out.push((name, seq));
-    }
-    out
-}
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: tirvish <fasta>");
-    let contigs = read_fasta(&path);
+    let contigs = tirvish_rs::read_fasta(&path);
     let mut els = run(&contigs);
     // sort like parse_tirvish gold output (by seqid as gt emits, then start)
     els.sort_by(|a, b| a.seqid.cmp(&b.seqid).then(a.start.cmp(&b.start)));

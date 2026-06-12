@@ -5,40 +5,19 @@
 //! Usage: seedcount <fasta> [--dump]
 //! Params are gt tirvish's: seed=20, mintirdist=10, maxtirdist=5000, maxtirlen=1000.
 
-use std::fs;
 use tirvish_rs::encode::{encode, ALPHA};
 use tirvish_rs::maxpairs::enumerate_maxpairs;
 use tirvish_rs::params;
 use tirvish_rs::sa::sa_lcp;
 use tirvish_rs::seeds::{store_seed, Seed};
 
-fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
-    let data = fs::read_to_string(path).expect("read fasta");
-    let mut out = Vec::new();
-    let mut name = String::new();
-    let mut seq: Vec<u8> = Vec::new();
-    for line in data.lines() {
-        if let Some(h) = line.strip_prefix('>') {
-            if !name.is_empty() {
-                out.push((std::mem::take(&mut name), std::mem::take(&mut seq)));
-            }
-            name = h.to_string();
-        } else {
-            seq.extend(line.bytes().map(|b| b.to_ascii_uppercase()));
-        }
-    }
-    if !name.is_empty() {
-        out.push((name, seq));
-    }
-    out
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = &args[1];
     let dump = args.iter().any(|a| a == "--dump");
 
-    let contigs = read_fasta(path);
+    let contigs = tirvish_rs::read_fasta(path);
     let total_bp: usize = contigs.iter().map(|(_, s)| s.len()).sum();
     eprintln!("contigs={} bp={}", contigs.len(), total_bp);
 

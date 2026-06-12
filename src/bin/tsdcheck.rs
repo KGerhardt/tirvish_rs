@@ -3,7 +3,6 @@
 //! against gt's TIRVISH_TRACE PAIR lines (lts/lte/rts/rte/rtts/rtte/tsd).
 //! Usage: tsdcheck <fasta>
 
-use std::fs;
 use tirvish_rs::encode::{encode, ALPHA};
 use tirvish_rs::maxpairs::enumerate_maxpairs;
 use tirvish_rs::params;
@@ -12,29 +11,10 @@ use tirvish_rs::seeds::{store_seed, Seed};
 use tirvish_rs::tsd::{build_pair, search_for_tsds};
 use tirvish_rs::xdrop::{calc_distances, extend_seed, ArbitraryScores};
 
-fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
-    let data = fs::read_to_string(path).expect("read fasta");
-    let mut out = Vec::new();
-    let (mut name, mut seq) = (String::new(), Vec::new());
-    for line in data.lines() {
-        if let Some(h) = line.strip_prefix('>') {
-            if !name.is_empty() {
-                out.push((std::mem::take(&mut name), std::mem::take(&mut seq)));
-            }
-            name = h.to_string();
-        } else {
-            seq.extend(line.bytes().map(|b| b.to_ascii_uppercase()));
-        }
-    }
-    if !name.is_empty() {
-        out.push((name, seq));
-    }
-    out
-}
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: tsdcheck <fasta>");
-    let contigs = read_fasta(&path);
+    let contigs = tirvish_rs::read_fasta(&path);
     let e = encode(&contigs);
     let nsuf = e.num_suffixes();
     let (sa, lcp) = sa_lcp(&e.sa_input, e.k);

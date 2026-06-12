@@ -12,8 +12,11 @@ use crate::sa::sa_lcp;
 use crate::seeds::{store_seed, Seed};
 use crate::similarity::{compute_similarity, double_smaller};
 use crate::tsd::{build_pair, search_for_tsds, TirPair};
-use crate::xdrop::{calc_distances, extend_seed, ArbitraryScores};
+use crate::encode::Encoded;
+use crate::xdrop::{calc_distances, extend_seed, ArbitraryDistances, ArbitraryScores};
+use rayon::prelude::*;
 use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 #[derive(Debug, Clone)]
 pub struct Element {
@@ -64,6 +67,64 @@ fn remove_overlaps(pairs: &mut [TirPair]) {
     }
 }
 
+/// Stages 2-4 for a single seed: xdrop extension -> build_pair (length gate) ->
+/// TSD search (mutates arm boundaries) -> similarity gate. Returns the resulting
+/// TirPair (possibly skip=true; stage 5 still needs it in the array) or None if
+/// the seed fails the length gate in build_pair. Pure w.r.t. shared state — only
+/// reads `e`/`scores`/`dist` and the thread_local front buffers — so it is safe
+/// to call concurrently from rayon workers. The atomics accumulate per-stage
+/// CPU-time only when `timeit` is set.
+#[allow(clippy::too_many_arguments)]
+fn process_seed(
+    s: &Seed,
+    e: &Encoded,
+    scores: &ArbitraryScores,
+    dist: &ArbitraryDistances,
+    timeit: bool,
+    a_xdrop: &AtomicU64,
+    a_tsd: &AtomicU64,
+    a_sim: &AtomicU64,
+) -> Option<TirPair> {
+    let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
+    let alilen = params::MAX_TIR_LEN - s.len;
+    let tx = if timeit { Some(std::time::Instant::now()) } else { None };
+    let (xl, xr) = extend_seed(
+        &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, scores, dist,
+        params::XDROP_BELOWSCORE,
+    );
+    if let Some(tx) = tx {
+        a_xdrop.fetch_add(tx.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    }
+    let mut pair = build_pair(
+        s.pos1, s.pos2, s.len, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
+        e.total_logical, params::MIN_TIR_LEN, params::MAX_TIR_LEN,
+    )?;
+    let seq_start = e.fwd_seqstart[s.contignumber as usize];
+    let seq_len = e.fwd_seqlen[s.contignumber as usize];
+    let tt = if timeit { Some(std::time::Instant::now()) } else { None };
+    search_for_tsds(
+        &mut pair, &e.enc, seq_start, seq_len, params::VICINITY,
+        params::MIN_TSD_LEN, params::MAX_TSD_LEN,
+    );
+    if let Some(tt) = tt {
+        a_tsd.fetch_add(tt.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    }
+    if !pair.skip
+        && (pair.left_tir_end <= pair.left_tir_start
+            || pair.right_tir_end <= pair.right_tir_start)
+    {
+        pair.skip = true;
+    }
+    if !pair.skip {
+        let ts = if timeit { Some(std::time::Instant::now()) } else { None };
+        compute_similarity(&mut pair, &e.twobit, params::SIMILARITY_THRESHOLD);
+        if let Some(ts) = ts {
+            a_sim.fetch_add(ts.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
+    }
+    Some(pair)
+}
+
 pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     // env-gated per-stage timing (TIRVISH_RS_TIME), to compare vs gt's breakdown.
     let timeit = std::env::var("TIRVISH_RS_TIME").is_ok();
@@ -94,43 +155,29 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     let dist = calc_distances(&scores);
 
     // first_pairs = ALL length-passing seeds (skip flags from stages 3+4).
-    let mut pairs: Vec<TirPair> = Vec::new();
-    for s in &seeds {
-        let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
-        let alilen = params::MAX_TIR_LEN - s.len;
-        let tx = std::time::Instant::now();
-        let (xl, xr) = extend_seed(
-            &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist,
-            params::XDROP_BELOWSCORE,
-        );
-        d_xdrop += tx.elapsed();
-        let mut pair = match build_pair(
-            s.pos1, s.pos2, s.len, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
-            e.total_logical, params::MIN_TIR_LEN, params::MAX_TIR_LEN,
-        ) {
-            Some(p) => p,
-            None => continue,
-        };
-        let seq_start = e.fwd_seqstart[s.contignumber as usize];
-        let seq_len = e.fwd_seqlen[s.contignumber as usize];
-        let tt = std::time::Instant::now();
-        search_for_tsds(
-            &mut pair, &e.enc, seq_start, seq_len, params::VICINITY,
-            params::MIN_TSD_LEN, params::MAX_TSD_LEN,
-        );
-        d_tsd += tt.elapsed();
-        if !pair.skip
-            && (pair.left_tir_end <= pair.left_tir_start
-                || pair.right_tir_end <= pair.right_tir_start)
-        {
-            pair.skip = true;
-        }
-        if !pair.skip {
-            let ts = std::time::Instant::now();
-            compute_similarity(&mut pair, &e.twobit, params::SIMILARITY_THRESHOLD);
-            d_sim += ts.elapsed();
-        }
-        pairs.push(pair);
+    //
+    // The per-seed body (stages 2-4: xdrop -> build_pair -> TSD -> similarity) is
+    // embarrassingly parallel — each seed maps independently to an Option<TirPair>
+    // and touches only immutable shared state (e.enc/e.twobit/scores/dist) plus
+    // the thread_local xdrop/greedyedist front buffers. par_iter preserves input
+    // order and stage 5 re-sorts, so the result is bit-exact for any worker count.
+    //
+    // Per-stage timing (TIRVISH_RS_TIME) accumulates CPU-time summed across all
+    // rayon workers via relaxed atomics; the loop's wall time is t_after_loop -
+    // t_stage1. With N workers the summed CPU-time can exceed the loop wall.
+    let a_xdrop = AtomicU64::new(0);
+    let a_tsd = AtomicU64::new(0);
+    let a_sim = AtomicU64::new(0);
+    let mut pairs: Vec<TirPair> = seeds
+        .par_iter()
+        .filter_map(|s| {
+            process_seed(s, &e, &scores, &dist, timeit, &a_xdrop, &a_tsd, &a_sim)
+        })
+        .collect();
+    if timeit {
+        d_xdrop = std::time::Duration::from_nanos(a_xdrop.load(AtomicOrdering::Relaxed));
+        d_tsd = std::time::Duration::from_nanos(a_tsd.load(AtomicOrdering::Relaxed));
+        d_sim = std::time::Duration::from_nanos(a_sim.load(AtomicOrdering::Relaxed));
     }
 
     // stage 5
@@ -171,12 +218,16 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     }
     if timeit {
         let total = t_start.elapsed();
-        let loop_other = t_after_loop.saturating_sub(t_stage1) - d_xdrop - d_tsd - d_sim;
+        // loop_wall is the wall time of the parallel per-seed loop; xdrop/tsd/sim
+        // are CPU-seconds SUMMED across rayon workers (so their sum can exceed
+        // loop_wall by ~Nthreads). nthreads from rayon's global pool.
+        let loop_wall = t_after_loop.saturating_sub(t_stage1);
         eprintln!(
-            "RSTIME stage1={:.1}s xdrop={:.1}s tsd={:.1}s sim={:.1}s loop_other={:.1}s stage5={:.1}s total={:.1}s",
-            t_stage1.as_secs_f64(), d_xdrop.as_secs_f64(), d_tsd.as_secs_f64(),
-            d_sim.as_secs_f64(), loop_other.as_secs_f64(),
-            (total - t_after_loop).as_secs_f64(), total.as_secs_f64()
+            "RSTIME stage1={:.1}s loop_wall={:.1}s [cpu: xdrop={:.1}s tsd={:.1}s sim={:.1}s] stage5={:.1}s total={:.1}s (nthreads={})",
+            t_stage1.as_secs_f64(), loop_wall.as_secs_f64(), d_xdrop.as_secs_f64(),
+            d_tsd.as_secs_f64(), d_sim.as_secs_f64(),
+            (total - t_after_loop).as_secs_f64(), total.as_secs_f64(),
+            rayon::current_num_threads()
         );
     }
     out

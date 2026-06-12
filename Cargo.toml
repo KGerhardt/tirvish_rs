@@ -9,6 +9,14 @@ description = "Faithful Rust port of gt tirvish (genometools 1.6.5) — independ
 # -threaded; avoids the libomp build dependency). LCP is computed via Kasai
 # (src/sa.rs), not libsais, so the large-alphabet text isn't needed post-SA.
 libsais = { version = "0.2", default-features = false }
+# Data parallelism over the per-seed loop (stages 2-4). The xdrop/greedyedist
+# front buffers are thread_local, so each rayon worker gets its own scratch —
+# safe as-is. par_iter is order-preserving, and stage 5 re-sorts, so the output
+# stays bit-exact regardless of worker scheduling.
+rayon = "1"
+# FASTA/FASTQ ingestion (multi-line join, gzip, faster parse than the hand-rolled
+# line reader). Pinned to grf_rs's version for a shared resolved dep set.
+needletail = "0.7.3"
 
 [[bin]]
 name = "tirvish_rs"

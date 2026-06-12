@@ -39,6 +39,25 @@
 //! byte-identical seeds → deterministic stages 2–5 → identical output. Hence:
 //! faithful ⟺ (1) exact seed set + (2) verbatim stages 2–5. Both oracle-checked.
 
+/// Read a FASTA into (header, uppercased-sequence) records via needletail.
+///
+/// `header` is the full record id (everything after `>` up to end of line, no
+/// whitespace split) — pipeline.rs strips the TIR-Learner `;;<n>` suffix. The
+/// sequence is uppercased to match gt's `-dna` handling; needletail joins
+/// multi-line records and transparently handles gzip. Matches the previous
+/// hand-rolled reader byte-for-byte on the oracle chunks while parsing faster.
+pub fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
+    let mut reader = needletail::parse_fastx_file(path).expect("open fasta");
+    let mut out = Vec::new();
+    while let Some(rec) = reader.next() {
+        let rec = rec.expect("fasta record");
+        let name = String::from_utf8_lossy(rec.id()).into_owned();
+        let seq = rec.seq().iter().map(|b| b.to_ascii_uppercase()).collect();
+        out.push((name, seq));
+    }
+    out
+}
+
 pub mod encode;
 pub mod maxpairs;
 pub mod params;
