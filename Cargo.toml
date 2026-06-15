@@ -1,8 +1,10 @@
 [package]
 name = "tirvish_rs"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-description = "Faithful Rust port of gt tirvish (genometools 1.6.5) — independent of grf_rs"
+license = "GPL-3.0-or-later"
+description = "Fast, faithful Rust port of gt tirvish (GenomeTools 1.6.5) — de-novo TIR transposon detection for TIR-Learner"
+repository = "https://github.com/KGerhardt/tirvish_rs"
 
 [dependencies]
 # SA construction over the integer mirror alphabet. openmp disabled (single
@@ -22,10 +24,6 @@ needletail = "0.7.3"
 # bit-identical banded result (similarity is a CANONICAL quantity, so any correct
 # Levenshtein is a faithful swap). greedy_unit_edist stays as the reference.
 rapidfuzz = "0.5"
-
-[[bin]]
-name = "tirvish_rs"
-path = "src/main.rs"
 
 [lib]
 name = "tirvish_rs"
