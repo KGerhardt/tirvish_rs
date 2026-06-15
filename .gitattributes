@@ -1,0 +1,4 @@
+# Keep the release source tarball lean: testdata/ (committed chunks + expected
+# outputs, ~5 MB) is repo-level validation data, not needed to build/run the tool.
+# GitHub's release (git archive) tarballs honor export-ignore.
+testdata export-ignore
