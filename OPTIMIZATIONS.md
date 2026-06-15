@@ -14,7 +14,7 @@ elements, every field). To reproduce the timings and verify identity yourself, s
 
 ---
 
-## 0. Faithfulness constraint
+## Preface: Faithfulness constraint and memory usage design
 
 `tirvish_rs` exactly reproduces `gt tirvish`'s raw prediction
 multiset. Even if more efficient, arguably better algorithms are available
@@ -34,6 +34,20 @@ The acceptance test is the oracle in `TIR-Learner/tirlearner_run/tirvish_oracle/
 (committed chunks + `gt tirvish` gold TSVs); per-stage validator bins
 (`seedcount`/`xdropcheck`/`tsdcheck`/`simcheck`) check each stage in isolation.
 
+This code was designed for deployment in the Purdue ANVIL supercomputer environment where
+thread count and memory are forcibly tied together at 2GB RAM per thread. We targeted
+this RAM limit as the acceptable upper cap for total per-thread RAM usage. This code was also
+developed specifically for TIR-Learner v4 (https://github.com/KGerhardt/TIR-Learner) 
+which uses genomeSplitter (https://github.com/KGerhardt/genomesplitter) to divide a genome into
+~5 million base pair fragments with overlaps that allow all TIRvish recoveries to be found 
+faithfully, if by parts.
+
+As a result of the expected fixed input size, we pursued some more memory-greedy decisions compared 
+to the GenomeTools version of TIRvish, most notably in that we use a fully in-memory suffix array 
+structure. Were a user to apply tirvish-rs to a large genome sequence, this could cause a large use of 
+RAM. We recommend doing exactly what TIR-Learner does: use genomeSplitter to pre-chunk your genome, THEN
+use tirvish-rs.
+
 ---
 
 ## Summary
@@ -51,61 +65,8 @@ Per-stage wall time, `gt` vs `tirvish_rs` (chunk0, single-threaded):
 
 \* `gt` stage 1 = `suffixerator` (~6 s) + `gt_enumeratemaxpairs` (~26.6 s).
 
-Peak RSS fell from 1.23 GB → 0.66 GB. A fragment-level batch driver processes
-pre-batched 5 Mb fragments 1/thread with tail work-stealing.
-
----
-
-## Stage 4 — Similarity (Levenshtein): the dominant win
-
-Stage 4 was 66% of `gt`'s runtime. It computes, for each candidate's two TIR
-arms, `sim = 100·(1 − edist/max(ulen,vlen))` and drops anything below 80%.
-
-### 4.1 Banded edit distance
-
-- **Problem.** `gt`'s `greedyunitedist` computes the *full* edit distance for
-  every candidate, including the ~20% that fail the 80% gate — grinding out a
-  large distance just to reject it.
-- **Fix.** Cap the DP band at `max/5 + 2`. A passer has `edist ≤ 0.2·max`, so it
-  stays exact; a failer bails the moment it exceeds the band.
-- **Gain.** Removed most of the wasted work on failers; the recorded similarity
-  of passers is unchanged.
-- **Why it's better.** The gate only needs the *exact* value for passers; failers
-  only need "below threshold." The `+2` margin guarantees no true passer is ever
-  cut. (Same trick as `grf_rs::seq_complexity` bailing once the boolean is decided.)
-
-### 4.2 Bit-parallel Levenshtein via `rapidfuzz` — the big one
-
-- **Problem.** Even banded, our hand-written greedy/diagonal front DP is *scalar*:
-  one DP cell per loop iteration. Similarity remained the largest stage.
-- **Fix.** We dumped the **actual** arm-pair corpus (4.34 M pairs from chunk0 via
-  the `simdump` bin) and benchmarked it against `strsim`, `triple_accel`,
-  `stringzilla`, and `rapidfuzz`. `rapidfuzz`'s block-based **bit-parallel Myers**
-  with a `score_cutoff` (= our band) won decisively, and produced a *bit-identical*
-  banded result (matching checksum over all 4.34 M pairs). Adopted it in
-  `compute_similarity`. The other crates' unbounded SIMD/scalar paths were slower
-  and did not finish within the benchmark deadline.
-- **Gain.** Similarity **89 s → ~15 s (≈5.7×)**.
-- **Why it's better.** Bit-parallel Myers evaluates 64 DP cells per machine word;
-  our scalar front did one per iteration. Since similarity is a *canonical*
-  quantity (§0), swapping the algorithm is faithful by construction — the matching
-  checksum and the oracle confirm it. (This **corrected an earlier false
-  conclusion** that "Myers is slower here": that was a naïve single-word Myers; a
-  production block-banded bit-parallel implementation wins by a wide margin.)
-
-### 4.3 Reused arm buffers
-
-- **Problem.** Feeding `rapidfuzz` an iterator that extracts each base from the
-  2-bit packed genome on the fly (`base_at`) compiled worse than handing it a
-  contiguous slice.
-- **Fix.** Materialize each arm once into a per-thread reused `Vec<u8>` (a tight
-  monomorphic fill loop), then pass `rapidfuzz` a slice.
-- **Gain.** Similarity **20 s → 17.4 s**.
-- **Why it's better.** Same number of `base_at` calls, but the bit-extraction
-  optimizes far better in a dedicated loop than threaded through a generic
-  iterator. The buffer is reused (≈1 KB/thread) — no per-pair allocation and, by
-  design, **no** materialization of the whole corpus (which would blow the RAM
-  budget; fine for a flat benchmark, wrong for production).
+Peak RAM use for tirvish-rs was 0.66 GB / thread in these tests, well under our 
+targeted 2 GB/thread. Most of this is the suffix array.
 
 ---
 
@@ -176,6 +137,59 @@ legal.
 
 ---
 
+## Stage 4 — Similarity (Levenshtein):
+
+Stage 4 was 66% of `gt`'s runtime. It computes, for each candidate's two TIR
+arms, `sim = 100·(1 − edist/max(ulen,vlen))` and drops anything below 80%.
+
+### 4.1 Banded edit distance
+
+- **Problem.** `gt`'s `greedyunitedist` computes the *full* edit distance for
+  every candidate, including the ~20% that fail the 80% gate — grinding out a
+  large distance just to reject it.
+- **Fix.** Cap the DP band at `max/5 + 2`. A passer has `edist ≤ 0.2·max`, so it
+  stays exact; a failer bails the moment it exceeds the band.
+- **Gain.** Removed most of the wasted work on failers; the recorded similarity
+  of passers is unchanged.
+- **Why it's better.** The gate only needs the *exact* value for passers; failers
+  only need "below threshold." The `+2` margin guarantees no true passer is ever
+  cut. (Same trick as `grf_rs::seq_complexity` bailing once the boolean is decided.)
+
+### 4.2 Bit-parallel Levenshtein via `rapidfuzz` — the big one
+
+- **Problem.** Even banded, our hand-written greedy/diagonal front DP is *scalar*:
+  one DP cell per loop iteration. Similarity remained the largest stage.
+- **Fix.** We dumped the **actual** arm-pair corpus (4.34 M pairs from chunk0 via
+  the `simdump` bin) and benchmarked it against `strsim`, `triple_accel`,
+  `stringzilla`, and `rapidfuzz`. `rapidfuzz`'s block-based **bit-parallel Myers**
+  with a `score_cutoff` (= our band) won decisively, and produced a *bit-identical*
+  banded result (matching checksum over all 4.34 M pairs). Adopted it in
+  `compute_similarity`. The other crates' unbounded SIMD/scalar paths were slower
+  and did not finish within the benchmark deadline.
+- **Gain.** Similarity **89 s → ~15 s (≈5.7×)**.
+- **Why it's better.** Bit-parallel Myers evaluates 64 DP cells per machine word;
+  our scalar front did one per iteration. Since similarity is a *canonical*
+  quantity (§0), swapping the algorithm is faithful by construction — the matching
+  checksum and the oracle confirm it. (This **corrected an earlier false
+  conclusion** that "Myers is slower here": that was a naïve single-word Myers; a
+  production block-banded bit-parallel implementation wins by a wide margin.)
+
+### 4.3 Reused arm buffers
+
+- **Problem.** Feeding `rapidfuzz` an iterator that extracts each base from the
+  2-bit packed genome on the fly (`base_at`) compiled worse than handing it a
+  contiguous slice.
+- **Fix.** Materialize each arm once into a per-thread reused `Vec<u8>` (a tight
+  monomorphic fill loop), then pass `rapidfuzz` a slice.
+- **Gain.** Similarity **20 s → 17.4 s**.
+- **Why it's better.** Same number of `base_at` calls, but the bit-extraction
+  optimizes far better in a dedicated loop than threaded through a generic
+  iterator. The buffer is reused (≈1 KB/thread) — no per-pair allocation and, by
+  design, **no** materialization of the whole corpus (which would blow the RAM
+  budget; fine for a flat benchmark, wrong for production).
+
+---
+
 ## Memory
 
 Goal: stay comfortably under ~2 GB/thread on the worst genomes so many fragments
@@ -243,8 +257,8 @@ pack onto one node.
 - **Gain.** ~2.7× faster than sequential single-file for the multi-fragment case;
   ~0.6 GB per concurrent fragment; tail-steal validated (idle workers pick up a
   straggler's seed chunks).
-- **Why it's better.** It matches the actual deployment, removes the per-fragment
-  serial-stage-1 bottleneck (fragments overlap each other's stage 1), avoids
+- **Why it's better.** It matches the actual deployment of 5 Mbp genome chunks,
+- removes the per-fragment serial-stage-1 bottleneck (fragments overlap each other's stage 1), avoids
   oversubscription, and keeps RAM per fragment bounded.
 
 ---
