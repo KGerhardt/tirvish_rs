@@ -47,6 +47,18 @@ impl TwoBit {
         TwoBit { fwd, fwd_spec, rev, rev_spec, len }
     }
 
+    /// ASCII base at `pos` (A/C/G/T), or 'N' for a special (separator/wildcard).
+    /// For materializing arm strings, e.g. the similarity benchmark corpus.
+    #[inline]
+    pub fn base_at(&self, pos: usize) -> u8 {
+        let (w, sh) = (pos / 32, 2 * (pos % 32));
+        if (self.fwd_spec[w] >> sh) & 1 != 0 {
+            b'N'
+        } else {
+            b"ACGT"[((self.fwd[w] >> sh) & 3) as usize]
+        }
+    }
+
     /// 64-bit window = 32 codes starting at `pos`, normalized to bit 0.
     #[inline]
     fn window(words: &[u64], pos: usize) -> u64 {
