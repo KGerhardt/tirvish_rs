@@ -39,20 +39,42 @@
 //! byte-identical seeds → deterministic stages 2–5 → identical output. Hence:
 //! faithful ⟺ (1) exact seed set + (2) verbatim stages 2–5. Both oracle-checked.
 
-/// Read a FASTA into (header, uppercased-sequence) records via needletail.
+/// Read a FASTA into (seqid, uppercased-sequence) records via needletail.
 ///
-/// `header` is the full record id (everything after `>` up to end of line, no
-/// whitespace split) and is carried through to the output verbatim — identifiers
-/// in the input are never modified. The sequence is uppercased to match gt's
-/// `-dna` handling; needletail joins
-/// multi-line records and transparently handles gzip. Matches the previous
-/// hand-rolled reader byte-for-byte on the oracle chunks while parsing faster.
+/// The seqid is the FASTA description (everything after `>`) truncated at the
+/// first whitespace — the first whitespace-delimited token, which is the
+/// universal FASTA/GFF3 convention (a GFF3 seqid is whitespace-free by spec).
+///
+/// `gt tirvish -seqids yes` does the same in spirit, but its walk only treats
+/// the SPACE character as a delimiter:
+///
+/// ```c
+/// // genometools 1.6.5, src/extended/tir_stream.c:925-933
+/// while (*(desc+i) != ' ' && i != desclength)
+///   i++;
+/// gt_str_append_cstr_nt(seqid, desc, i);
+/// ```
+///
+/// Splitting on a literal space alone (ignoring tab) is a gt quirk: a
+/// tab-containing header would leak a tab into the GFF seqid, which is invalid.
+/// We split on ANY ASCII whitespace instead — the bioinformatics norm and a
+/// strict superset of gt's behavior on every header without an embedded tab
+/// (i.e. all real-world headers, including the oracle fixtures), so the gold
+/// tests are unaffected. The trailing free-text description is dropped; the
+/// token itself — including any caller-owned suffix such as genomeSplitter's
+/// `;;<n>` (which contains no whitespace) — is carried through verbatim.
+/// Identifiers are never otherwise modified. The sequence is uppercased to match
+/// gt's `-dna` handling; needletail joins multi-line records and transparently
+/// handles gzip.
 pub fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
     let mut reader = needletail::parse_fastx_file(path).expect("open fasta");
     let mut out = Vec::new();
     while let Some(rec) = reader.next() {
         let rec = rec.expect("fasta record");
-        let name = String::from_utf8_lossy(rec.id()).into_owned();
+        // seqid = description up to the first ASCII whitespace (space, tab, ...).
+        let id = rec.id();
+        let token = id.split(|&b| b.is_ascii_whitespace()).next().unwrap_or(b"");
+        let name = String::from_utf8_lossy(token).into_owned();
         let seq = rec.seq().iter().map(|b| b.to_ascii_uppercase()).collect();
         out.push((name, seq));
     }
