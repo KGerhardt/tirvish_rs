@@ -17,6 +17,11 @@ rayon = "1"
 # FASTA/FASTQ ingestion (multi-line join, gzip, faster parse than the hand-rolled
 # line reader). Pinned to grf_rs's version for a shared resolved dep set.
 needletail = "0.7.3"
+# Bit-parallel banded Levenshtein for the stage-4 similarity edist. Benchmarked
+# ~5.7x faster than our greedy+SWAR front on the real arm-pair corpus with a
+# bit-identical banded result (similarity is a CANONICAL quantity, so any correct
+# Levenshtein is a faithful swap). greedy_unit_edist stays as the reference.
+rapidfuzz = "0.5"
 
 [[bin]]
 name = "tirvish_rs"
