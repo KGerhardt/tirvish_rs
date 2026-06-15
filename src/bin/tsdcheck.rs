@@ -41,7 +41,7 @@ fn main() {
         let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
         let alilen = params::MAX_TIR_LEN - s.len;
         let (xl, xr) = extend_seed(
-            &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist,
+            &e.twobit, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist,
             params::XDROP_BELOWSCORE,
         );
         let pair = build_pair(

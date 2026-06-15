@@ -158,7 +158,7 @@ fn process_seed(
     let alilen = params::MAX_TIR_LEN - s.len;
     let tx = if timeit { Some(std::time::Instant::now()) } else { None };
     let (xl, xr) = extend_seed(
-        &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, scores, dist,
+        &e.twobit, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, scores, dist,
         params::XDROP_BELOWSCORE,
     );
     if let Some(tx) = tx {

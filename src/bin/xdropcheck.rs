@@ -41,7 +41,7 @@ fn main() {
         let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
         let alilen = params::MAX_TIR_LEN - s.len; // gt: max_tir_length - seedptr->len
         let (xl, xr) = extend_seed(
-            &e.enc, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist, belowscore,
+            &e.twobit, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, &scores, &dist, belowscore,
         );
         out.push_str(&format!(
             "XD\tp1={}\tp2={}\tslen={}\tLi={}\tLj={}\tRi={}\tRj={}\n",

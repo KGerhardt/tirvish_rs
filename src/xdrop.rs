@@ -9,7 +9,7 @@
 //! mirror already stores reverse-complement bases, so `dir_is_complement` is moot;
 //! `GT_ISSPECIAL` becomes `code >= ALPHA`.
 
-use crate::encode::ALPHA;
+use crate::twobit::TwoBit;
 
 #[derive(Clone, Copy)]
 pub struct ArbitraryScores {
@@ -76,36 +76,6 @@ const DELETIONBIT: u8 = 2;
 const INSERTIONBIT: u8 = 4;
 
 #[inline]
-fn get_char(forward: bool, seq: &[u32], pos: usize) -> u32 {
-    if forward {
-        seq[pos]
-    } else {
-        seq[seq.len() - 1 - pos]
-    }
-}
-
-/// gt: gt_seqabstract_lcp (seqabstract.c:205). Breaks at a special (>= ALPHA).
-fn seq_lcp(forward: bool, useq: &[u32], vseq: &[u32], u_start: usize, v_start: usize) -> usize {
-    let maxlen = (useq.len() - u_start).min(vseq.len() - v_start);
-    let mut lcp = 0;
-    while lcp < maxlen {
-        let u_cc = get_char(forward, useq, u_start + lcp);
-        if u_cc >= ALPHA {
-            break;
-        }
-        let v_cc = get_char(forward, vseq, v_start + lcp);
-        if v_cc >= ALPHA {
-            break;
-        }
-        if u_cc != v_cc {
-            break;
-        }
-        lcp += 1;
-    }
-    lcp
-}
-
-#[inline]
 fn frontidx(d: i64, k: i64) -> usize {
     (d * d + d + k) as usize
 }
@@ -118,17 +88,36 @@ thread_local! {
         std::cell::RefCell::new((Vec::new(), Vec::new(), Vec::new()));
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn eval_xdrop(
     forward: bool,
-    useq: &[u32],
-    vseq: &[u32],
+    ulen_u: usize,
+    vlen_u: usize,
+    tb: &TwoBit,
+    ubase: usize,
+    vbase: usize,
     xdropbelowscore: i64,
     scores: &ArbitraryScores,
     dist: &ArbitraryDistances,
 ) -> XdropBest {
-    let ulen = useq.len() as i64;
-    let vlen = vseq.len() as i64;
+    let ulen = ulen_u as i64;
+    let vlen = vlen_u as i64;
     debug_assert!(ulen != 0 && vlen != 0);
+    // SWAR LCE over the 2-bit mirror genome — identical value to the old scalar
+    // seq_lcp (tb.lce is unit-tested == naive), just 32 bases/op. Forward (right
+    // extension) ascends from ubase/vbase; reverse (left extension) descends.
+    let lce = |u_start: i64, v_start: i64| -> i64 {
+        let maxlen = (ulen - u_start).min(vlen - v_start);
+        if maxlen <= 0 {
+            return 0;
+        }
+        let m = maxlen as usize;
+        if forward {
+            tb.lce(true, ubase + u_start as usize, vbase + v_start as usize, m) as i64
+        } else {
+            tb.lce(false, ubase - u_start as usize, vbase - v_start as usize, m) as i64
+        }
+    };
     let end_k = ulen - vlen;
     let integermax = ulen.max(vlen);
     let integermin = -integermax;
@@ -163,7 +152,7 @@ pub fn eval_xdrop(
     let ubound;
 
     // phase 0
-    let idx0 = seq_lcp(forward, useq, vseq, 0, 0) as i64;
+    let idx0 = lce(0, 0);
     if idx0 >= ulen || idx0 >= vlen {
         lbound = 1;
         ubound = -1;
@@ -245,7 +234,7 @@ pub fn eval_xdrop(
                     || (fr[frontidx(currd - 1, k)] < i && i <= ulen.min(vlen + k))
                 {
                     if ulen > i && vlen > j {
-                        let lcp = seq_lcp(forward, useq, vseq, i as usize, j as usize) as i64;
+                        let lcp = lce(i, j);
                         i += lcp;
                         j += lcp;
                     }
@@ -337,7 +326,7 @@ pub fn eval_xdrop(
 /// gt_tir_searchforTIRs (tir_stream.c:514-600). Returns (xdrop_left, xdrop_right).
 #[allow(clippy::too_many_arguments)]
 pub fn extend_seed(
-    enc: &[u32],
+    tb: &TwoBit,
     pos1: u64,
     pos2: u64,
     len: u64,
@@ -353,28 +342,31 @@ pub fn extend_seed(
     let mut xleft = XdropBest::default();
     let mut xright = XdropBest::default();
 
-    // left (reverse) xdrop
+    // left (reverse) xdrop. Both arms have length l; the LCE descends from the
+    // base just inside the seed (pos1-1 / pos2-1).
     if alilen != 0 && pos1 > seqstart1 && pos2 > seqstart2 {
         let l = if alilen <= pos1 - seqstart1 && alilen <= pos2 - seqstart2 {
             alilen
         } else {
             (pos1 - seqstart1).min(pos2 - seqstart2)
         };
-        let useq = &enc[(pos1 - l) as usize..pos1 as usize];
-        let vseq = &enc[(pos2 - l) as usize..pos2 as usize];
-        xleft = eval_xdrop(false, useq, vseq, belowscore, scores, dist);
+        xleft = eval_xdrop(
+            false, l as usize, l as usize, tb, (pos1 - 1) as usize, (pos2 - 1) as usize,
+            belowscore, scores, dist,
+        );
     }
 
-    // right (forward) xdrop
+    // right (forward) xdrop. LCE ascends from the base just past the seed.
     if alilen != 0 && pos1 + len < seqend1 && pos2 + len < seqend2 {
         let l = if alilen <= seqend1 - (pos1 + len) && alilen <= seqend2 - (pos2 + len) {
             alilen
         } else {
             (seqend1 - (pos1 + len)).min(seqend2 - (pos2 + len))
         };
-        let useq = &enc[(pos1 + len) as usize..(pos1 + len + l) as usize];
-        let vseq = &enc[(pos2 + len) as usize..(pos2 + len + l) as usize];
-        xright = eval_xdrop(true, useq, vseq, belowscore, scores, dist);
+        xright = eval_xdrop(
+            true, l as usize, l as usize, tb, (pos1 + len) as usize, (pos2 + len) as usize,
+            belowscore, scores, dist,
+        );
     }
     (xleft, xright)
 }
