@@ -52,9 +52,6 @@ search, vs tirvish_rs single-threaded. Consistent ~6.2–6.8× across all four:
 | chunk3  | ~521      | 78.2           | 6.7×    |
 | **all** | **~2425** | **372.7**      | **6.5×**|
 
-chunk1 is the slowest ratio because it is the most Xdrop-heavy chunk, and Xdrop is
-the least-accelerated stage (a faithfulness-locked heuristic — see `OPTIMIZATIONS.md`).
-
 ## Pipeline (gt source → module)
 
 1. `encode` / `sa` — gt's `-mirrored` encseq layout; SA via libsais over an
