@@ -30,6 +30,28 @@ pub struct Element {
     pub sim: f64,
 }
 
+/// Final elements as the gold-shape TSV (header + rows), sorted by (seqid, start)
+/// like parse_tirvish. Shared by the single-file CLI and run_batch's per-fragment
+/// emission. Sorts `els` in place.
+pub fn elements_tsv(els: &mut [Element]) -> String {
+    els.sort_by(|a, b| a.seqid.cmp(&b.seqid).then(a.start.cmp(&b.start)));
+    let mut s = String::with_capacity(48 + els.len() * 40);
+    s.push_str("seqid\tstart\tstop\ttir1\ttir2\ttsd1\ttsd2\tsim\n");
+    for el in els.iter() {
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\n",
+            el.seqid, el.start, el.stop, el.tir1, el.tir2, el.tsd1, el.tsd2, el.sim
+        ));
+    }
+    s
+}
+
+/// Inner per-seed parallelism granularity floor. The seed loop is the FRAGMENT's
+/// internal parallelism; with fragment-level (outer) parallelism saturating the
+/// pool in bulk, this keeps the inner split coarse (near-inert) and only lets
+/// idle workers steal seeds in ~SEED_PAR_BLOCK-sized chunks at the tail.
+const SEED_PAR_BLOCK: usize = 8192;
+
 /// Compact projection of a TirPair retained for stage 5 (sort + overlap removal +
 /// emission). Drops the compute-only fields (pos1/pos2/seed_len and the mirror
 /// coords right_tir_start/end) that stages 2-4 needed but stage 5 never reads.
@@ -258,6 +280,7 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     let a_sim = AtomicU64::new(0);
     let collected = seeds
         .par_iter()
+        .with_min_len(SEED_PAR_BLOCK)
         .enumerate()
         .fold(Collected::default, |mut acc, (i, s)| {
             if let Some(pair) =

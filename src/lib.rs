@@ -58,6 +58,39 @@ pub fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Size the global rayon pool to `threads` (call once at startup; later calls are
+/// no-ops). The batch driver's outer per-fragment par_iter and pipeline::run's
+/// inner per-seed par_iter both run in this one pool.
+pub fn set_threads(threads: usize) {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .build_global()
+        .ok();
+}
+
+/// Batch entry: process pre-batched fragment FASTAs with parallelism at the
+/// FRAGMENT level (1 fragment/worker), writing `<outdir>/<basename>.tirvish.tsv`
+/// per fragment as it finishes. The per-seed inner par_iter in pipeline::run
+/// nests in the same global pool, so it stays near-inert while every worker has
+/// its own fragment (bulk = inter-fragment, 100% efficiency) and only splits a
+/// fragment's seeds when workers go idle at the tail (intra-fragment steal).
+/// Mirrors grf_rs::run_batch. Returns the number of fragments processed.
+pub fn run_batch(paths: &[String], outdir: &str) -> usize {
+    use rayon::prelude::*;
+    paths.par_iter().for_each(|path| {
+        let contigs = read_fasta(path);
+        let mut els = pipeline::run(&contigs);
+        let base = std::path::Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "out".into());
+        let out = format!("{}/{}.tirvish.tsv", outdir, base);
+        std::fs::write(&out, pipeline::elements_tsv(&mut els))
+            .unwrap_or_else(|e| panic!("write {out}: {e}"));
+    });
+    paths.len()
+}
+
 pub mod encode;
 pub mod maxpairs;
 pub mod params;
