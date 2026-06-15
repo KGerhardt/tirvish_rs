@@ -2,8 +2,7 @@
 
 A change-by-change record of how `tirvish_rs` went from a faithful-but-slow port
 of `gt tirvish` to ~6.5× faster single-threaded (and a fragment-parallel batch
-driver), **without ever changing the output**. Each entry follows:
-**Problem → Fix → Gain → Why it's better**.
+driver), with identical output.
 
 All numbers are chunk0 of the oracle fixture (a ~5 Mb multi-FASTA of Pacific white
 shrimp contigs — a near-worst case for TIRvish), single-threaded unless noted.
@@ -40,7 +39,8 @@ this RAM limit as the acceptable upper cap for total per-thread RAM usage. This 
 developed specifically for TIR-Learner v4 (https://github.com/KGerhardt/TIR-Learner) 
 which uses genomeSplitter (https://github.com/KGerhardt/genomesplitter) to divide a genome into
 ~5 million base pair fragments with overlaps that allow all TIRvish recoveries to be found 
-faithfully, if by parts.
+faithfully, if by parts - any overlap size exceeding the max distance at which TIR elements may
+be found will work.
 
 As a result of the expected fixed input size, we pursued some more memory-greedy decisions compared 
 to the GenomeTools version of TIRvish, most notably in that we use a fully in-memory suffix array 
