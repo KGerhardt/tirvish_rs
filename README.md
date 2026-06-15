@@ -2,15 +2,12 @@
 
 A faithful Rust port of genometools' `gt tirvish` (GenomeTools 1.6.5) — de-novo
 terminal-inverted-repeat (TIR) transposon detection — built to replace the
-pathologically slow `gt tirvish` step in the TIR-Learner pipeline on
+sometimes slow `gt tirvish` step in the TIR-Learner pipeline on
 repeat-rich genomes.
-
-**Independent tool.** May copy code from `grf_rs` (same author) but does not
-depend on it or ship with it.
 
 ## Status: complete & bit-exact
 
-All five stages are ported and validated against an instrumented `gt tirvish`
+`tirvish-rs` has been validated against an instrumented `gt tirvish`
 (1.6.5) reference. On the committed oracle (four ~5 Mb Pacific white shrimp
 chunks, multi-contig), the full pipeline reproduces gt's output **exactly**:
 
@@ -27,10 +24,7 @@ coordinates (33,776 seeds → 32,061 extended/scored pairs → final elements).
 
 This is the **faithful** port (single-threaded, no algorithmic shortcuts).
 Optimization (alloc reuse, banded edit distance, 2-bit/XOR comparisons) is the
-next phase and must stay validated against this same oracle. Parallelism is
-deferred to last: it improves wall-clock by spending more compute, whereas the
-goal is reducing CPU-seconds (single-threaded efficiency), which then multiplies
-with any later parallelism.
+next phase and must stay validated against this same oracle.
 
 ## Performance (per-stage, chunk0, single-threaded)
 
