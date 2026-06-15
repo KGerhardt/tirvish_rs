@@ -15,27 +15,45 @@ chunks, multi-contig), the full pipeline reproduces gt's output **exactly**:
 tsd2 sim`). Each stage was also validated tuple-for-tuple in gt's own internal
 coordinates (33,776 seeds → 32,061 extended/scored pairs → final elements).
 
+The exact expected outputs are committed in `testdata/expected_candidates.tar.gz`
+(the four per-chunk candidate TSVs); `testdata/run_compare.sh` regenerates them
+with `gt tirvish` + `tirvish_rs` side by side, times both, and diffs them.
+
 ## Performance (per-stage, chunk0, single-threaded)
 
-Wall seconds for the faithful port vs the instrumented gt 1.6.5 reference, on
-chunk0 (~5.25 Mb, ~5.1 M seeds). Already ~2.7× faster end-to-end **before any
-optimization** — from the Rust constant factor plus a brute-force TSD search
-(gt builds a suffix array per seed; this doesn't).
+Wall seconds for the final tirvish_rs vs the instrumented gt 1.6.5 reference, on
+chunk0 (~5.25 Mb, ~5.1 M seeds). See `OPTIMIZATIONS.md` for the change-by-change
+account of how each stage got here.
 
 | stage            | gt                                     | tirvish_rs | speedup |
 |------------------|----------------------------------------|------------|---------|
-| stage 1 (seeds)  | ~32.6 (suffixerator 6 + maxpairs 26.6) | 10.6       | ~3×     |
-| 2 — Xdrop        | 132.7                                  | 98.5       | 1.35×   |
-| 3 — TSD          | 70.6                                   | 19.2       | 3.7×    |
-| 4 — similarity   | 405.7                                  | 93.9       | 4.3×    |
-| 5 — sort+overlap | 1.4                                    | 1.0        | 1.4×    |
-| **total**        | **~611**                               | **224**    | **2.7×**|
+| stage 1 (seeds)  | ~32.6 (suffixerator 6 + maxpairs 26.6) | ~10        | ~3×     |
+| 2 — Xdrop        | 132.7                                  | 48         | 2.8×    |
+| 3 — TSD          | 70.6                                   | 14         | 5×      |
+| 4 — similarity   | 405.7                                  | 17         | 24×     |
+| 5 — sort+overlap | 1.4                                    | 0.7        | 2×      |
+| **total**        | **~618**                               | **~94**    | **~6.5×**|
 
-Note the dominant stage moved: in gt, similarity is ~66%; in tirvish_rs, Xdrop
-(98.5 s) and similarity (93.9 s) are co-dominant, so optimization weights both.
-(`TIRVISH_RS_TIME=1 ./target/release/tirvish <fa>` prints this breakdown.)
+The dominant stage moved twice: in gt, similarity is ~66%; a bit-parallel banded
+edit distance cut it to ~17 s, leaving Xdrop (~48 s) as the largest stage. (These
+per-stage figures were measured during development; the env-gated timing
+instrumentation has since been removed from the production build.)
 
 ## Performance (overall, all chunks, single-threaded)
+
+End-to-end wall time per oracle chunk — gt = `suffixerator` (~6 s) + `tirvish`
+search, vs tirvish_rs single-threaded. Consistent ~6.2–6.8× across all four:
+
+| chunk   | gt (s)    | tirvish_rs (s) | speedup |
+|---------|----------:|---------------:|--------:|
+| chunk0  | ~618      | 94.9           | 6.5×    |
+| chunk1  | ~743      | 119.1          | 6.2×    |
+| chunk2  | ~544      | 80.5           | 6.8×    |
+| chunk3  | ~521      | 78.2           | 6.7×    |
+| **all** | **~2425** | **372.7**      | **6.5×**|
+
+chunk1 is the slowest ratio because it is the most Xdrop-heavy chunk, and Xdrop is
+the least-accelerated stage (a faithfulness-locked heuristic — see `OPTIMIZATIONS.md`).
 
 ## Pipeline (gt source → module)
 
@@ -54,12 +72,21 @@ Note the dominant stage moved: in gt, similarity is ~66%; in tirvish_rs, Xdrop
 
 ```
 cargo build --release
-./target/release/tirvish <genome.fa>        # gold-TSV: seqid start stop tir1 tir2 tsd1 tsd2 sim
+
+# single fragment -> stdout (gold-TSV: seqid start stop tir1 tir2 tsd1 tsd2 sim)
+./target/release/tirvish <genome.fa>
+
+# batch of pre-chunked fragments: one <basename>.tirvish.tsv per fragment,
+# parallel at the fragment level (a straggler's seeds get stolen at the tail)
+./target/release/tirvish --batch <outdir> [--threads N] <frag1.fa> <frag2.fa> ...
+./target/release/tirvish --batch <outdir> [--threads N]      # paths from stdin
 ```
+
+It operates directly on a FASTA — no pre-built mirrored index needed. All gt
+tirvish parameters are accepted as options; defaults are the TIR-Learner
+invocation: `-seed 20 -mintirlen 10 -maxtirlen 1000 -mintirdist 10 -maxtirdist
+5000 -similar 80 -mintsd 2 -maxtsd 11 -vic 13` (Xdrop scores `-mat 2 -mis -2
+-ins -3 -del -3 -xdrop 5`).
 
 Per-stage validators (compare against an instrumented gt's `TIRVISH_TRACE` /
 `TIRVISH_XD` dumps): `seedcount`, `xdropcheck`, `tsdcheck`, `simcheck`.
-
-Parameters are locked to the TIR-Learner invocation: `-seed 20 -mintirlen 10
--maxtirlen 1000 -mintirdist 10 -maxtirdist 5000 -similar 80 -mintsd 2 -maxtsd 11
--vic 13` (Xdrop scores at gt defaults: mat 2, mis -2, ins/del -3, xdrop 5).
