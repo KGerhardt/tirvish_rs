@@ -6,9 +6,11 @@ driver), **without ever changing the output**. Each entry follows:
 **Problem → Fix → Gain → Why it's better**.
 
 All numbers are chunk0 of the oracle fixture (a ~5 Mb multi-FASTA of Pacific white
-shrimp contigs — a near-worst case for TIRvish), single-threaded unless noted, on
-a 10-physical / 20-logical-core box. Every change is **bit-exact** against the
-committed gold sets (4 chunks, 1153 elements, every field).
+shrimp contigs — a near-worst case for TIRvish), single-threaded unless noted.
+Every change is **bit-exact** against the committed gold sets (4 chunks, 1153
+elements, every field). To reproduce the timings and verify identity yourself, see
+`testdata/` (`run_compare.sh` runs `gt tirvish` and `tirvish_rs` side by side with
+`/usr/bin/time -v` and diffs the predictions).
 
 ---
 
@@ -242,15 +244,11 @@ pack onto one node.
   remaining + in-flight fragments < workers, idle workers steal a straggler's
   seed chunks). CLI: `tirvish --batch <outdir> [--threads N] <paths…|stdin>`.
 - **Gain.** ~2.7× faster than sequential single-file for the multi-fragment case;
-  ~0.57 GB/thread; tail-steal validated (4 fragments → 7.9×).
+  ~0.6 GB per concurrent fragment; tail-steal validated (idle workers pick up a
+  straggler's seed chunks).
 - **Why it's better.** It matches the actual deployment, removes the per-fragment
   serial-stage-1 bottleneck (fragments overlap each other's stage 1), avoids
-  oversubscription, and bounds RAM. **Caveat / honest limit:** on the 10-physical
-  -core test box, peak throughput (~8.6× on 20 logical) is the *same* whether we
-  parallelize per-fragment or per-seed — the per-seed DP kernel is memory-latency
-  -bound, so 10 physical cores (SMT adding little) is the ceiling regardless of
-  *level*. The win is correctness-of-shape and scaling with physical cores on HPC
-  nodes, not a higher peak on this machine.
+  oversubscription, and keeps RAM per fragment bounded.
 
 ---
 
@@ -298,14 +296,13 @@ attacks did more total cell work than they saved. (Superseded anyway by §4.2.)
 
 ---
 
-## What's left (deliberately not done)
+## Open directions
 
-- **xdrop is at its faithful ceiling.** It's a heuristic stage (§0), so it can't be
-  algorithm-swapped; the remaining headroom is micro-SIMD on the cell eval, with
-  diminishing returns.
-- **Reducing the seed count** (a bounded MEM finder) is the only lever that would
-  hit stages 2–4 at once, but the seeds are real maximal pairs (above), so dropping
-  any means proving it never produces a surviving element — not promising at 1.6×
-  redundancy.
+- **xdrop is a heuristic stage** (§0), so any speedup must reproduce its exact
+  result — it can't be algorithm-swapped the way similarity was. SIMD on the cell
+  eval and further cache/branch work are open.
+- **Reducing the seed count** (a bounded MEM finder) would hit stages 2–4 at once.
+  The seeds are real maximal pairs (above), so dropping any requires proving it
+  never produces a surviving element.
 - **PyO3 entry** into TIR-Learner's `tirvish_new.py` would reuse the `run_batch`
   logic over in-memory fragments (as `grf_rs::do_rusty_grf` does).
