@@ -70,13 +70,23 @@ targeted 2 GB/thread. Most of this is the suffix array.
 
 ---
 
+## Sequence representation
+
+The original gt TIRvish utilizes a character string representation of genomic sequence.
+There is nothing wrong with such a representation, but it is less efficient in both memory usage
+and performance than is available when working with genome sequences encoded in twobit format.
+
+tirvish-rs uses the twobit format for all of its work after the suffix array. It consumes less RAM
+and it enables neat tricks like bitwise XOR for sequence identity checks.
+
+---
+
 ## Stage 2 — Xdrop arm extension
 
 Xdrop extends each exact seed outward into full TIR arms via a greedy X-drop
 gapped alignment (`gt_evalxdroparbitscoresextend`: scores mat +2 / mis −2 / ins −3
 / del −3, drop threshold 5), run twice per seed (left + right) over ~5 M seeds =
-~10 M extensions. It is a **heuristic** stage (§0): only constant-factor wins are
-legal.
+~10 M extensions. It is a **heuristic** stage (§0).
 
 ### 2.1 SWAR snake
 
@@ -123,6 +133,9 @@ legal.
 - **Why it's better.** On windows this small, the asymptotic structure of a suffix
   array is pure overhead; a linear scan wins on constants. Output-identical
   (validated tuple-for-tuple against `gt`'s trace, including the SA tie-break order).
+- **Risk.** This approach would be less performant than the original if max TSD size
+  were set to a much, much higher value than the default 13. There is no good biological
+  reason to do so.
 
 ### 3.2 Thread-local scratch
 
@@ -155,7 +168,7 @@ arms, `sim = 100·(1 − edist/max(ulen,vlen))` and drops anything below 80%.
   only need "below threshold." The `+2` margin guarantees no true passer is ever
   cut. (Same trick as `grf_rs::seq_complexity` bailing once the boolean is decided.)
 
-### 4.2 Bit-parallel Levenshtein via `rapidfuzz` — the big one
+### 4.2 Bit-parallel Levenshtein via `rapidfuzz`
 
 - **Problem.** Even banded, our hand-written greedy/diagonal front DP is *scalar*:
   one DP cell per loop iteration. Similarity remained the largest stage.
@@ -170,9 +183,7 @@ arms, `sim = 100·(1 − edist/max(ulen,vlen))` and drops anything below 80%.
 - **Why it's better.** Bit-parallel Myers evaluates 64 DP cells per machine word;
   our scalar front did one per iteration. Since similarity is a *canonical*
   quantity (§0), swapping the algorithm is faithful by construction — the matching
-  checksum and the oracle confirm it. (This **corrected an earlier false
-  conclusion** that "Myers is slower here": that was a naïve single-word Myers; a
-  production block-banded bit-parallel implementation wins by a wide margin.)
+  checksum and the oracle confirm it.
 
 ### 4.3 Reused arm buffers
 
@@ -185,8 +196,7 @@ arms, `sim = 100·(1 − edist/max(ulen,vlen))` and drops anything below 80%.
 - **Why it's better.** Same number of `base_at` calls, but the bit-extraction
   optimizes far better in a dedicated loop than threaded through a generic
   iterator. The buffer is reused (≈1 KB/thread) — no per-pair allocation and, by
-  design, **no** materialization of the whole corpus (which would blow the RAM
-  budget; fine for a flat benchmark, wrong for production).
+  design, **no** materialization of the whole corpus.
 
 ---
 
