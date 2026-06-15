@@ -289,7 +289,8 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
             continue;
         }
         let seqstart = e.fwd_seqstart[pair.contignumber as usize];
-        let name = contigs[pair.contignumber as usize].0.split(";;").next().unwrap().to_string();
+        // Emit the sequence id verbatim — never mutate identifiers the input carries.
+        let name = contigs[pair.contignumber as usize].0.clone();
         // gt emits the two TIR features sorted by GtRange (start, then end), so
         // parse_tirvish reads tir1 = the (start,end)-first arm. Normally the left
         // arm comes first, but post-TSD the transformed right arm can start at or

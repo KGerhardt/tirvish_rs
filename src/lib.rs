@@ -42,8 +42,9 @@
 /// Read a FASTA into (header, uppercased-sequence) records via needletail.
 ///
 /// `header` is the full record id (everything after `>` up to end of line, no
-/// whitespace split) — pipeline.rs strips the TIR-Learner `;;<n>` suffix. The
-/// sequence is uppercased to match gt's `-dna` handling; needletail joins
+/// whitespace split) and is carried through to the output verbatim — identifiers
+/// in the input are never modified. The sequence is uppercased to match gt's
+/// `-dna` handling; needletail joins
 /// multi-line records and transparently handles gzip. Matches the previous
 /// hand-rolled reader byte-for-byte on the oracle chunks while parsing faster.
 pub fn read_fasta(path: &str) -> Vec<(String, Vec<u8>)> {

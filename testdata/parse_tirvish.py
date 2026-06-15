@@ -45,14 +45,12 @@ def parse(path):
         if len(next_result) != 6:
             odd += 1
             return
-        m = genome_split_regex.match(seqid)
-        short_id = m.group(1) if m else seqid
         full_start, full_stop = min(next_result[0]), max(next_result[0])
         tsd1 = next_result[1][1] - next_result[1][0] + 1
         tsd2 = next_result[5][1] - next_result[5][0] + 1
         tir1 = next_result[3][1] - next_result[3][0] + 1
         tir2 = next_result[4][1] - next_result[4][0] + 1
-        rows.append((short_id, full_start, full_stop, tir1, tir2, tsd1, tsd2, sim))
+        rows.append((seqid, full_start, full_stop, tir1, tir2, tsd1, tsd2, sim))
 
     with open(path) as fh:
         for line in fh:
