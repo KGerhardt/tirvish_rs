@@ -168,14 +168,33 @@ pub fn greedy_unit_edist(tb: &TwoBit, u_start: usize, v_start: usize, ulen_u: us
 /// real arm-pair corpus (benchmarked, bit-identical checksum). The arms are
 /// special-free by construction (xdrop stops at specials), so iterating the four
 /// ACGT codes is exact — no wildcard handling needed.
+thread_local! {
+    // Per-thread arm scratch (reused; capacity retained). Materializing each arm
+    // once via base_at in a tight loop, then handing rapidfuzz contiguous slices,
+    // lets the bit-extraction compile better than threading base_at through
+    // rapidfuzz's generic iterator. Bounded by the max arm (~MAX_TIR_LEN), so a
+    // couple of KB/thread — no per-pair alloc, no whole-corpus materialization.
+    static SIM_BUF: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        std::cell::RefCell::new((Vec::new(), Vec::new()));
+}
+
 fn banded_edist(tb: &TwoBit, u_start: usize, ulen: usize, v_start: usize, vlen: usize) -> u64 {
     use rapidfuzz::distance::levenshtein;
     let band = ulen.max(vlen) / 5 + 2;
-    let u = (0..ulen).map(|i| tb.base_at(u_start + i));
-    let v = (0..vlen).map(|i| tb.base_at(v_start + i));
-    levenshtein::distance_with_args(u, v, &levenshtein::Args::default().score_cutoff(band))
+    SIM_BUF.with(|cell| {
+        let (ubuf, vbuf) = &mut *cell.borrow_mut();
+        ubuf.clear();
+        ubuf.extend((0..ulen).map(|i| tb.base_at(u_start + i)));
+        vbuf.clear();
+        vbuf.extend((0..vlen).map(|i| tb.base_at(v_start + i)));
+        levenshtein::distance_with_args(
+            ubuf.iter().copied(),
+            vbuf.iter().copied(),
+            &levenshtein::Args::default().score_cutoff(band),
+        )
         .map(|d| d as u64)
         .unwrap_or((band + 1) as u64)
+    })
 }
 
 /// gt: the similarity block. Computes ulen/vlen/edist/similarity on `pair`,
