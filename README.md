@@ -5,26 +5,15 @@ terminal-inverted-repeat (TIR) transposon detection — built to replace the
 sometimes slow `gt tirvish` step in the TIR-Learner pipeline on
 repeat-rich genomes.
 
-## Status: complete & bit-exact
+## Complete & bit-exact
 
 `tirvish-rs` has been validated against an instrumented `gt tirvish`
 (1.6.5) reference. On the committed oracle (four ~5 Mb Pacific white shrimp
 chunks, multi-contig), the full pipeline reproduces gt's output **exactly**:
 
-| chunk | elements |
-|-------|----------|
-| chunk0 | 270 |
-| chunk1 | 267 |
-| chunk2 | 295 |
-| chunk3 | 321 |
-
 **1,153 elements total, every field identical** (`start stop tir1 tir2 tsd1
 tsd2 sim`). Each stage was also validated tuple-for-tuple in gt's own internal
 coordinates (33,776 seeds → 32,061 extended/scored pairs → final elements).
-
-This is the **faithful** port (single-threaded, no algorithmic shortcuts).
-Optimization (alloc reuse, banded edit distance, 2-bit/XOR comparisons) is the
-next phase and must stay validated against this same oracle.
 
 ## Performance (per-stage, chunk0, single-threaded)
 
@@ -45,6 +34,8 @@ optimization** — from the Rust constant factor plus a brute-force TSD search
 Note the dominant stage moved: in gt, similarity is ~66%; in tirvish_rs, Xdrop
 (98.5 s) and similarity (93.9 s) are co-dominant, so optimization weights both.
 (`TIRVISH_RS_TIME=1 ./target/release/tirvish <fa>` prints this breakdown.)
+
+## Performance (overall, all chunks, single-threaded)
 
 ## Pipeline (gt source → module)
 
