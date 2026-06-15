@@ -75,11 +75,11 @@ pub fn set_threads(threads: usize) {
 /// its own fragment (bulk = inter-fragment, 100% efficiency) and only splits a
 /// fragment's seeds when workers go idle at the tail (intra-fragment steal).
 /// Mirrors grf_rs::run_batch. Returns the number of fragments processed.
-pub fn run_batch(paths: &[String], outdir: &str) -> usize {
+pub fn run_batch(paths: &[String], outdir: &str, p: &crate::params::Params) -> usize {
     use rayon::prelude::*;
     paths.par_iter().for_each(|path| {
         let contigs = read_fasta(path);
-        let mut els = pipeline::run(&contigs);
+        let mut els = pipeline::run(&contigs, p);
         let base = std::path::Path::new(path)
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

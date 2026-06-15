@@ -61,3 +61,56 @@ pub const OVERLAPS_BEST: bool = true;
 pub const fn reversepos(total_len: u64, pos: u64) -> u64 {
     total_len - 1 - pos
 }
+
+/// Runtime TIRvish parameters (the gt tirvish options). `Default` is the locked
+/// TIR-Learner value set (the consts above); the CLI overrides individual fields.
+#[derive(Clone, Copy, Debug)]
+pub struct Params {
+    pub seed: u64,
+    pub min_tir_len: u64,
+    pub max_tir_len: u64,
+    pub min_tir_dist: u64,
+    pub max_tir_dist: u64,
+    pub min_tsd_len: u64,
+    pub max_tsd_len: u64,
+    pub vicinity: u64,
+    pub similar: f64,
+    /// Precomputed (100 - similar)/100, so the similarity band in the hot loop is
+    /// `max * sim_mult + 2` rather than recomputing the fraction per call.
+    pub sim_mult: f64,
+    pub xdrop_mat: i32,
+    pub xdrop_mis: i32,
+    pub xdrop_ins: i32,
+    pub xdrop_del: i32,
+    pub xdrop_belowscore: i64,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Params {
+            seed: SEED,
+            min_tir_len: MIN_TIR_LEN,
+            max_tir_len: MAX_TIR_LEN,
+            min_tir_dist: MIN_TIR_DIST,
+            max_tir_dist: MAX_TIR_DIST,
+            min_tsd_len: MIN_TSD_LEN,
+            max_tsd_len: MAX_TSD_LEN,
+            vicinity: VICINITY,
+            similar: SIMILARITY_THRESHOLD,
+            sim_mult: (100.0 - SIMILARITY_THRESHOLD) / 100.0,
+            xdrop_mat: XDROP_MAT,
+            xdrop_mis: XDROP_MIS,
+            xdrop_ins: XDROP_INS,
+            xdrop_del: XDROP_DEL,
+            xdrop_belowscore: XDROP_BELOWSCORE,
+        }
+    }
+}
+
+impl Params {
+    /// Set the similarity threshold and keep `sim_mult` consistent.
+    pub fn set_similar(&mut self, similar: f64) {
+        self.similar = similar;
+        self.sim_mult = (100.0 - similar) / 100.0;
+    }
+}

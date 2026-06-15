@@ -7,7 +7,7 @@
 
 use crate::encode::{encode, ALPHA};
 use crate::maxpairs::enumerate_maxpairs;
-use crate::params;
+use crate::params::Params;
 use crate::sa::sa_lcp;
 use crate::seeds::{store_seed, Seed};
 use crate::similarity::{compute_similarity, double_smaller};
@@ -16,7 +16,6 @@ use crate::encode::Encoded;
 use crate::xdrop::{calc_distances, extend_seed, ArbitraryDistances, ArbitraryScores};
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 #[derive(Debug, Clone)]
 pub struct Element {
@@ -102,7 +101,6 @@ fn compare_tirs(a: &LeanPair, b: &LeanPair) -> Ordering {
 struct Collected {
     live: Vec<LeanPair>,
     p0: Option<LeanPair>,
-    n_pass: u64, // count of length-passers (live + skipped); diagnostic
 }
 
 /// gt_tir_remove_overlaps, "best" mode (keep max-similarity per overlapping
@@ -161,45 +159,31 @@ fn remove_overlaps_pruned(pairs: &mut [LeanPair], p0: Option<&LeanPair>) {
 /// Stages 2-4 for a single seed: xdrop extension -> build_pair (length gate) ->
 /// TSD search (mutates arm boundaries) -> similarity gate. Returns the resulting
 /// TirPair (possibly skip=true; stage 5 still needs it in the array) or None if
-/// the seed fails the length gate in build_pair. Pure w.r.t. shared state — only
-/// reads `e`/`scores`/`dist` and the thread_local front buffers — so it is safe
-/// to call concurrently from rayon workers. The atomics accumulate per-stage
-/// CPU-time only when `timeit` is set.
-#[allow(clippy::too_many_arguments)]
+/// the seed fails the length gate in build_pair. Reads only `e`/`scores`/`dist`/`p`
+/// and the thread_local front buffers, so it is safe to call concurrently from
+/// rayon workers.
 fn process_seed(
     s: &Seed,
     e: &Encoded,
     scores: &ArbitraryScores,
     dist: &ArbitraryDistances,
-    timeit: bool,
-    a_xdrop: &AtomicU64,
-    a_tsd: &AtomicU64,
-    a_sim: &AtomicU64,
+    p: &Params,
 ) -> Option<TirPair> {
     let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
-    let alilen = params::MAX_TIR_LEN - s.len;
-    let tx = if timeit { Some(std::time::Instant::now()) } else { None };
+    let alilen = p.max_tir_len - s.len;
     let (xl, xr) = extend_seed(
         &e.twobit, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, scores, dist,
-        params::XDROP_BELOWSCORE,
+        p.xdrop_belowscore,
     );
-    if let Some(tx) = tx {
-        a_xdrop.fetch_add(tx.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-    }
     let mut pair = build_pair(
         s.pos1, s.pos2, s.len, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
-        e.total_logical, params::MIN_TIR_LEN, params::MAX_TIR_LEN,
+        e.total_logical, p.min_tir_len, p.max_tir_len,
     )?;
     let seq_start = e.fwd_seqstart[s.contignumber as usize];
     let seq_len = e.fwd_seqlen[s.contignumber as usize];
-    let tt = if timeit { Some(std::time::Instant::now()) } else { None };
     search_for_tsds(
-        &mut pair, &e.enc, seq_start, seq_len, params::VICINITY,
-        params::MIN_TSD_LEN, params::MAX_TSD_LEN,
+        &mut pair, &e.enc, seq_start, seq_len, p.vicinity, p.min_tsd_len, p.max_tsd_len,
     );
-    if let Some(tt) = tt {
-        a_tsd.fetch_add(tt.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-    }
     if !pair.skip
         && (pair.left_tir_end <= pair.left_tir_start
             || pair.right_tir_end <= pair.right_tir_start)
@@ -207,23 +191,12 @@ fn process_seed(
         pair.skip = true;
     }
     if !pair.skip {
-        let ts = if timeit { Some(std::time::Instant::now()) } else { None };
-        compute_similarity(&mut pair, &e.twobit, params::SIMILARITY_THRESHOLD);
-        if let Some(ts) = ts {
-            a_sim.fetch_add(ts.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-        }
+        compute_similarity(&mut pair, &e.twobit, p.similar, p.sim_mult);
     }
     Some(pair)
 }
 
-pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
-    // env-gated per-stage timing (TIRVISH_RS_TIME), to compare vs gt's breakdown.
-    let timeit = std::env::var("TIRVISH_RS_TIME").is_ok();
-    let t_start = std::time::Instant::now();
-    let mut d_xdrop = std::time::Duration::ZERO;
-    let mut d_tsd = std::time::Duration::ZERO;
-    let mut d_sim = std::time::Duration::ZERO;
-
+pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
     let mut e = encode(contigs);
     let nsuf = e.num_suffixes();
 
@@ -241,26 +214,23 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             (suftab, lcptab)
         }; // i32 sa/lcp freed
         e.sa_input = Vec::new(); // SA built; libsais text no longer needed (~T*4 B)
-        enumerate_maxpairs(&suftab, &lcptab, params::SEED, ALPHA, &e.enc, |len, p1, p2| {
+        enumerate_maxpairs(&suftab, &lcptab, p.seed, ALPHA, &e.enc, |len, p1, p2| {
             store_seed(
                 &mut seeds, len, p1, p2, e.midpos, e.total_logical, e.num_contigs,
-                &e.seqnum_of, params::MIN_TIR_DIST, params::MAX_TIR_DIST, params::MAX_TIR_LEN,
+                &e.seqnum_of, p.min_tir_dist, p.max_tir_dist, p.max_tir_len,
             );
         });
     } // suftab/lcptab freed
     e.seqnum_of = Vec::new(); // only store_seed read it (~T*4 B)
 
-    let t_stage1 = t_start.elapsed();
     let scores = ArbitraryScores {
-        mat: params::XDROP_MAT, mis: params::XDROP_MIS,
-        ins: params::XDROP_INS, del: params::XDROP_DEL,
+        mat: p.xdrop_mat, mis: p.xdrop_mis, ins: p.xdrop_ins, del: p.xdrop_del,
     };
     let dist = calc_distances(&scores);
 
     // Stages 2-4 are embarrassingly parallel: each seed maps independently to an
     // Option<TirPair> (None = length-gate fail), touching only immutable shared
-    // state (e.enc/e.twobit/scores/dist) + the thread_local xdrop/greedyedist
-    // front buffers.
+    // state (e/scores/dist/p) + the thread_local front buffers.
     //
     // MEMORY: retain ONLY the live (non-skipped) length-passers, not all of them.
     // gt keeps every length-passer in first_pairs for the overlap sort, but in
@@ -268,26 +238,14 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
     // can touch refrng/maxsim — inert and droppable. The one skipped pair that can
     // affect output is the global-first (index-0 seed); keep it separately as `p0`.
     // The seed index (via .enumerate()) reproduces the validated stable-sort tie
-    // -break. Each kept candidate is projected to a compact LeanPair. NOTE most
-    // length-passers PASS similarity (chunk0: 3.67M of 4.57M live), so this drops
-    // the ~20% skipped, not the bulk; the live set is still large and is the
-    // dominant memory term. See [`LeanPair`] / [`remove_overlaps_pruned`].
-    //
-    // Per-stage timing (TIRVISH_RS_TIME): CPU-time summed across workers via
-    // relaxed atomics; with N workers the sum can exceed the loop wall.
-    let a_xdrop = AtomicU64::new(0);
-    let a_tsd = AtomicU64::new(0);
-    let a_sim = AtomicU64::new(0);
+    // -break. Each kept candidate is projected to a compact LeanPair.
     let collected = seeds
         .par_iter()
         .with_min_len(SEED_PAR_BLOCK)
         .enumerate()
         .fold(Collected::default, |mut acc, (i, s)| {
-            if let Some(pair) =
-                process_seed(s, &e, &scores, &dist, timeit, &a_xdrop, &a_tsd, &a_sim)
-            {
+            if let Some(pair) = process_seed(s, &e, &scores, &dist, p) {
                 let idx = i as u32;
-                acc.n_pass += 1;
                 let lean = LeanPair::from_pair(idx, &pair);
                 // p0 = argmin over ALL length-passers (skipped or not) by
                 // (compare_tirs, seed_index) = gt's pairs[0].
@@ -306,7 +264,6 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
         })
         .reduce(Collected::default, |mut a, mut b| {
             a.live.append(&mut b.live);
-            a.n_pass += b.n_pass;
             a.p0 = match (a.p0, b.p0) {
                 (None, x) | (x, None) => x,
                 (Some(x), Some(y)) => {
@@ -319,25 +276,9 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             };
             a
         });
-    if timeit {
-        d_xdrop = std::time::Duration::from_nanos(a_xdrop.load(AtomicOrdering::Relaxed));
-        d_tsd = std::time::Duration::from_nanos(a_tsd.load(AtomicOrdering::Relaxed));
-        d_sim = std::time::Duration::from_nanos(a_sim.load(AtomicOrdering::Relaxed));
-    }
-
-    if timeit {
-        eprintln!(
-            "RSCOUNT seeds={} length_passers={} live(sim>=80)={} skipped={}",
-            seeds.len(),
-            collected.n_pass,
-            collected.live.len(),
-            collected.n_pass - collected.live.len() as u64,
-        );
-    }
 
     // stage 5: sort the live survivors (compare_tirs, then seed index to match the
     // original stable full-array sort), then remove_overlaps seeded from p0.
-    let t_after_loop = t_start.elapsed();
     let mut live = collected.live;
     live.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
     remove_overlaps_pruned(&mut live, collected.p0.as_ref());
@@ -372,20 +313,6 @@ pub fn run(contigs: &[(String, Vec<u8>)]) -> Vec<Element> {
             tsd2: pair.tsd_length,
             sim: pair.similarity,
         });
-    }
-    if timeit {
-        let total = t_start.elapsed();
-        // loop_wall is the wall time of the parallel per-seed loop; xdrop/tsd/sim
-        // are CPU-seconds SUMMED across rayon workers (so their sum can exceed
-        // loop_wall by ~Nthreads). nthreads from rayon's global pool.
-        let loop_wall = t_after_loop.saturating_sub(t_stage1);
-        eprintln!(
-            "RSTIME stage1={:.1}s loop_wall={:.1}s [cpu: xdrop={:.1}s tsd={:.1}s sim={:.1}s] stage5={:.1}s total={:.1}s (nthreads={})",
-            t_stage1.as_secs_f64(), loop_wall.as_secs_f64(), d_xdrop.as_secs_f64(),
-            d_tsd.as_secs_f64(), d_sim.as_secs_f64(),
-            (total - t_after_loop).as_secs_f64(), total.as_secs_f64(),
-            rayon::current_num_threads()
-        );
     }
     out
 }

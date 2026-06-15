@@ -178,9 +178,20 @@ thread_local! {
         std::cell::RefCell::new((Vec::new(), Vec::new()));
 }
 
-fn banded_edist(tb: &TwoBit, u_start: usize, ulen: usize, v_start: usize, vlen: usize) -> u64 {
+fn banded_edist(
+    tb: &TwoBit,
+    u_start: usize,
+    ulen: usize,
+    v_start: usize,
+    vlen: usize,
+    sim_mult: f64,
+) -> u64 {
     use rapidfuzz::distance::levenshtein;
-    let band = ulen.max(vlen) / 5 + 2;
+    // band = floor(max * (100-similar)/100) + 2: a passer (edist <= max*sim_mult)
+    // stays exact, anything beyond bails to band+1. For the default 80% gate
+    // sim_mult = 0.2, so this is max/5 + 2 (bit-identical; the f64 floor matches
+    // integer max/5 over the arm-length range).
+    let band = (ulen.max(vlen) as f64 * sim_mult) as usize + 2;
     SIM_BUF.with(|cell| {
         let (ubuf, vbuf) = &mut *cell.borrow_mut();
         ubuf.clear();
@@ -199,7 +210,12 @@ fn banded_edist(tb: &TwoBit, u_start: usize, ulen: usize, v_start: usize, vlen: 
 
 /// gt: the similarity block. Computes ulen/vlen/edist/similarity on `pair`,
 /// sets skip if below threshold. Returns (ulen, vlen, edist) for validation.
-pub fn compute_similarity(pair: &mut TirPair, tb: &TwoBit, threshold: f64) -> (u64, u64, u64) {
+pub fn compute_similarity(
+    pair: &mut TirPair,
+    tb: &TwoBit,
+    threshold: f64,
+    sim_mult: f64,
+) -> (u64, u64, u64) {
     let ulen = pair.left_tir_end - pair.left_tir_start;
     let vlen = pair.right_tir_end - pair.right_tir_start;
     let edist = banded_edist(
@@ -208,6 +224,7 @@ pub fn compute_similarity(pair: &mut TirPair, tb: &TwoBit, threshold: f64) -> (u
         ulen as usize,
         pair.right_tir_start as usize,
         vlen as usize,
+        sim_mult,
     );
     pair.similarity = 100.0 * (1.0 - edist as f64 / ulen.max(vlen) as f64);
     if double_smaller(pair.similarity, threshold) {
