@@ -14,24 +14,21 @@ elements, every field). To reproduce the timings and verify identity yourself, s
 
 ---
 
-## 0. The constraint that shapes everything: faithfulness
+## 0. Faithfulness constraint
 
-The contract is that `tirvish_rs` reproduces `gt tirvish`'s raw prediction
-multiset exactly. That splits the pipeline's five stages into two kinds, and the
-distinction decides which optimizations are even *legal*:
+`tirvish_rs` exactly reproduces `gt tirvish`'s raw prediction
+multiset. Even if more efficient, arguably better algorithms are available
+to complete a given logical step, tirvish-rs does not use them unless they have
+the exact same final output. There are therefore two kinds of optimizations in the code:
 
 - **Canonical stages** compute a well-defined mathematical value. *Any* correct
-  algorithm yields the same number, so the implementation is freely replaceable.
-  → **Stage 4 (similarity)** computes Levenshtein edit distance.
+  algorithm yields the same number, so the most performant algorithm is preferred,
+  e.g. any algorithm computing Levenshtein edit distance.
 - **Heuristic stages** compute an *algorithm-defined* result: the answer depends
   on the specific algorithm's choices (scores, tie-breaks, pruning order). A
-  "better" algorithm gives a *different* answer and breaks the gold.
-  → **Stage 2 (xdrop)** computes a greedy X-drop extension whose stopping point
-  *is* the output.
-
-So similarity could be swapped wholesale for a faster library; xdrop could only be
-sped up by constant factors that preserve its exact result. This asymmetry is the
-single most important idea in this document.
+  "better" algorithm gives a *different* answer e.g., GenomeTools' greedy X-drop
+  extension whose stopping point *is* the output. Optimizations must preserve
+  algorithmic choices exactly.
 
 The acceptance test is the oracle in `TIR-Learner/tirlearner_run/tirvish_oracle/`
 (committed chunks + `gt tirvish` gold TSVs); per-stage validator bins
