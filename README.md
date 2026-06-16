@@ -1,9 +1,23 @@
 # tirvish_rs
 
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](https://bioconda.github.io/recipes/tirvish-rs/README.html)
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/tirvish-rs/badges/version.svg)](https://anaconda.org/bioconda/tirvish-rs)
+
 A faithful Rust port of genometools' `gt tirvish` (GenomeTools 1.6.5) — de-novo
 terminal-inverted-repeat (TIR) transposon detection — built to replace the
 sometimes slow `gt tirvish` step in the TIR-Learner pipeline on
 repeat-rich genomes.
+
+## Install
+
+Available from [Bioconda](https://bioconda.github.io/recipes/tirvish-rs/README.html):
+
+```
+conda install -c bioconda tirvish-rs
+```
+
+This installs the `tirvish` binary (and a `tirvish_rs` alias). You can also build
+from source with `cargo build --release` (see [Build / run](#build--run)).
 
 ## Complete & bit-exact
 
@@ -11,9 +25,12 @@ repeat-rich genomes.
 (1.6.5) reference. On the committed oracle (four ~5 Mb Pacific white shrimp
 chunks, multi-contig), the full pipeline reproduces gt's output **exactly**:
 
-**1,153 elements total, every field identical** (`start stop tir1 tir2 tsd1
-tsd2 sim`). Each stage was also validated tuple-for-tuple in gt's own internal
-coordinates (33,776 seeds → 32,061 extended/scored pairs → final elements).
+**1,153 elements total, every field identical**. Each hit is emitted as one row
+carrying the six `(start, stop)` coordinate pairs gt writes per element — full
+element, TSD1, body, TIR1, TIR2, TSD2 — plus `tir_similarity` (the exact data gt
+puts in its GFF, minus the line-bucketed/regex parsing). Each stage was also
+validated tuple-for-tuple in gt's own internal coordinates (33,776 seeds →
+32,061 extended/scored pairs → final elements).
 
 The exact expected outputs are committed in `testdata/expected_candidates.tar.gz`
 (the four per-chunk candidate TSVs); `testdata/run_compare.sh` regenerates them
@@ -63,14 +80,15 @@ search, vs tirvish_rs single-threaded. Consistent ~6.2–6.8× across all four:
 5. `tsd` — `gt_tir_search_for_TSDs` + best-TSD (brute-force flank MEMs; gt builds
    a per-seed suffix array, this doesn't).
 6. `similarity` — `greedyunitedist` (Myers O(nd) unit edit distance) + the gate.
-7. `pipeline` — sort + `gt_tir_remove_overlaps` "best" + GFF coordinate output.
+7. `pipeline` — sort + `gt_tir_remove_overlaps` "best" + TSV coordinate output
+   (the six per-element `(start, stop)` pairs gt would emit as GFF features).
 
 ## Build / run
 
 ```
 cargo build --release
 
-# single fragment -> stdout (gold-TSV: seqid start stop tir1 tir2 tsd1 tsd2 sim)
+# single fragment -> stdout (TSV: seqid + the six per-element coord pairs + sim)
 ./target/release/tirvish <genome.fa>
 
 # batch of pre-chunked fragments: one <basename>.tirvish.tsv per fragment,
