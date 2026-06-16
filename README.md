@@ -1,6 +1,6 @@
 # tirvish_rs
 
-[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](https://bioconda.github.io/recipes/tirvish-rs/README.html)
+[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](https://anaconda.org/bioconda/tirvish-rs)
 [![Anaconda-Server Badge](https://anaconda.org/bioconda/tirvish-rs/badges/version.svg)](https://anaconda.org/bioconda/tirvish-rs)
 
 A faithful Rust port of genometools' `gt tirvish` (GenomeTools 1.6.5) — de-novo
@@ -10,7 +10,7 @@ repeat-rich genomes.
 
 ## Install
 
-Available from [Bioconda](https://bioconda.github.io/recipes/tirvish-rs/README.html):
+Available from [Bioconda](https://anaconda.org/bioconda/tirvish-rs):
 
 ```
 conda install -c bioconda tirvish-rs
