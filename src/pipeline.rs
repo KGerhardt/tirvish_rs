@@ -17,15 +17,31 @@ use crate::xdrop::{calc_distances, extend_seed, ArbitraryDistances, ArbitrarySco
 use rayon::prelude::*;
 use std::cmp::Ordering;
 
+/// One TIRvish hit, carried as the SIX (start, stop) coordinate pairs that gt
+/// tirvish emits per element and that TIR-Learner's one_tirvish ingests as
+/// `next_result[0..5]` — full element, TSD1, body (no-TSD), TIR1, TIR2, TSD2, in
+/// that order. We emit exactly these position data and nothing derived: the
+/// consumer rebuilds `next_result` from the columns with plain splits and runs
+/// the identical length/size calculations it ran on the GFF. Coordinates are
+/// 1-based inclusive, local to the contig, exactly as gt writes them. TIR1/TIR2
+/// are the two arms in gt's `(start, end)` GFF order (TIR1 = the smaller).
+/// `sim` (gt's tir_similarity) is the lone non-position field, kept as a trailing
+/// diagnostic for the gold diffs; the consumer ignores it.
 #[derive(Debug, Clone)]
 pub struct Element {
     pub seqid: String,
-    pub start: u64,
-    pub stop: u64,
-    pub tir1: u64,
-    pub tir2: u64,
-    pub tsd1: u64,
-    pub tsd2: u64,
+    pub full_start: u64,
+    pub full_stop: u64,
+    pub tsd1_start: u64,
+    pub tsd1_stop: u64,
+    pub body_start: u64,
+    pub body_stop: u64,
+    pub tir1_start: u64,
+    pub tir1_stop: u64,
+    pub tir2_start: u64,
+    pub tir2_stop: u64,
+    pub tsd2_start: u64,
+    pub tsd2_stop: u64,
     pub sim: f64,
 }
 
@@ -33,13 +49,29 @@ pub struct Element {
 /// like parse_tirvish. Shared by the single-file CLI and run_batch's per-fragment
 /// emission. Sorts `els` in place.
 pub fn elements_tsv(els: &mut [Element]) -> String {
-    els.sort_by(|a, b| a.seqid.cmp(&b.seqid).then(a.start.cmp(&b.start)));
-    let mut s = String::with_capacity(48 + els.len() * 40);
-    s.push_str("seqid\tstart\tstop\ttir1\ttir2\ttsd1\ttsd2\tsim\n");
+    els.sort_by(|a, b| a.seqid.cmp(&b.seqid).then(a.full_start.cmp(&b.full_start)));
+    let mut s = String::with_capacity(64 + els.len() * 80);
+    s.push_str(
+        "seqid\tfull_start\tfull_stop\ttsd1_start\ttsd1_stop\tbody_start\tbody_stop\t\
+         tir1_start\ttir1_stop\ttir2_start\ttir2_stop\ttsd2_start\ttsd2_stop\tsim\n",
+    );
     for el in els.iter() {
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\n",
-            el.seqid, el.start, el.stop, el.tir1, el.tir2, el.tsd1, el.tsd2, el.sim
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\n",
+            el.seqid,
+            el.full_start,
+            el.full_stop,
+            el.tsd1_start,
+            el.tsd1_stop,
+            el.body_start,
+            el.body_stop,
+            el.tir1_start,
+            el.tir1_stop,
+            el.tir2_start,
+            el.tir2_stop,
+            el.tsd2_start,
+            el.tsd2_stop,
+            el.sim
         ));
     }
     s
@@ -291,27 +323,51 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
         let seqstart = e.fwd_seqstart[pair.contignumber as usize];
         // Emit the sequence id verbatim — never mutate identifiers the input carries.
         let name = contigs[pair.contignumber as usize].0.clone();
-        // gt emits the two TIR features sorted by GtRange (start, then end), so
-        // parse_tirvish reads tir1 = the (start,end)-first arm. Normally the left
-        // arm comes first, but post-TSD the transformed right arm can start at or
-        // before the left arm; when they share a start, the smaller end wins.
-        let left_len = pair.left_tir_end - pair.left_tir_start + 1;
-        let right_len = pair.right_transformed_end - pair.right_transformed_start + 1;
-        let left_key = (pair.left_tir_start, pair.left_tir_end);
-        let right_key = (pair.right_transformed_start, pair.right_transformed_end);
-        let (tir1, tir2) = if left_key <= right_key {
-            (left_len, right_len)
+        // The six (start, stop) pairs gt emits per element, 1-based and local to
+        // the contig. The full element is anchored on the left-arm start and the
+        // right-arm end (± one TSD); the body (no-TSD element) sits one TSD inside
+        // each end; the two TSDs flank the body.
+        let tsd = pair.tsd_length;
+        let full_start = pair.left_tir_start - seqstart - tsd + 1;
+        let full_stop = pair.right_transformed_end - seqstart + tsd + 1;
+        let body_start = full_start + tsd;
+        let body_stop = full_stop - tsd;
+        let tsd1_start = full_start;
+        let tsd1_stop = body_start - 1;
+        let tsd2_start = body_stop + 1;
+        let tsd2_stop = full_stop;
+        // The two TIR arms, each in its own coordinates. gt emits the two TIR
+        // features sorted by GtRange (start, then end), so TIR1 = the (start,end)-
+        // first arm. Post-TSD the transformed right arm can start at or before the
+        // left arm (the arms cross over when long), so sort rather than assume
+        // left-then-right; when starts tie the smaller end wins.
+        let left_arm = (
+            pair.left_tir_start - seqstart + 1,
+            pair.left_tir_end - seqstart + 1,
+        );
+        let right_arm = (
+            pair.right_transformed_start - seqstart + 1,
+            pair.right_transformed_end - seqstart + 1,
+        );
+        let (tir1, tir2) = if left_arm <= right_arm {
+            (left_arm, right_arm)
         } else {
-            (right_len, left_len)
+            (right_arm, left_arm)
         };
         out.push(Element {
             seqid: name,
-            start: pair.left_tir_start - seqstart - pair.tsd_length + 1,
-            stop: pair.right_transformed_end - seqstart + pair.tsd_length + 1,
-            tir1,
-            tir2,
-            tsd1: pair.tsd_length,
-            tsd2: pair.tsd_length,
+            full_start,
+            full_stop,
+            tsd1_start,
+            tsd1_stop,
+            body_start,
+            body_stop,
+            tir1_start: tir1.0,
+            tir1_stop: tir1.1,
+            tir2_start: tir2.0,
+            tir2_stop: tir2.1,
+            tsd2_start,
+            tsd2_stop,
             sim: pair.similarity,
         });
     }

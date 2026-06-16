@@ -49,17 +49,18 @@ for fa in "$WORK"/chunk*.fa; do
   # ---- tirvish_rs ----
   /usr/bin/time -v "$RS" "$fa" > "$WORK/$base.rs.tsv" 2> "$WORK/$base.rs.time"
 
-  # ---- diff predictions (gt GFF -> TSV; compare on the element key, cols 1-7) ----
-  python3 parse_tirvish.py "$WORK/$base.gt.gff" "$WORK/$base.gt.tsv" >/dev/null
+  # ---- diff predictions: translate gt GFF into the tirvish_rs column shape and
+  #      diff EVERY column (the six coordinate pairs gt emits per element + sim) ----
+  python3 gff_to_tsv.py "$WORK/$base.gt.gff" "$WORK/$base.gt.tsv"
   if diff -q \
-       <(tail -n +2 "$WORK/$base.gt.tsv" | cut -f1-7 | sort) \
-       <(tail -n +2 "$WORK/$base.rs.tsv" | cut -f1-7 | sort) >/dev/null; then
+       <(tail -n +2 "$WORK/$base.gt.tsv" | sort) \
+       <(tail -n +2 "$WORK/$base.rs.tsv" | sort) >/dev/null; then
     n=$(( $(wc -l < "$WORK/$base.rs.tsv") - 1 ))
     echo "OUTPUTS IDENTICAL: $n predictions match"
   else
     echo "!!! MISMATCH !!!"
-    diff <(tail -n +2 "$WORK/$base.gt.tsv" | cut -f1-7 | sort) \
-         <(tail -n +2 "$WORK/$base.rs.tsv" | cut -f1-7 | sort) | head -20
+    diff <(tail -n +2 "$WORK/$base.gt.tsv" | sort) \
+         <(tail -n +2 "$WORK/$base.rs.tsv" | sort) | head -20
     rc=1
   fi
 

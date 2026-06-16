@@ -9,9 +9,12 @@ with `/usr/bin/time -v`, and diffs the predictions to show they are identical.
 - `chunks.tar.gz` — `chunk0.fa` … `chunk3.fa` (multi-FASTA fragments; the script
   extracts these to a temp dir).
 - `run_compare.sh` — runs both tools per chunk, times each call, diffs outputs.
-- `parse_tirvish.py` — converts `gt tirvish` GFF3 to the same TSV shape
-  `tirvish_rs` emits (`seqid start stop tir1 tir2 tsd1 tsd2 sim`); cols 1–7 are
-  the prediction key the diff compares.
+- `gff_to_tsv.py` — converts `gt tirvish` GFF3 into the exact TSV shape `tirvish_rs`
+  emits, so the two can be diffed directly. Each row carries the six `(start,stop)`
+  coordinate pairs gt writes per element — `full`, `TSD1`, `body`, `TIR1`, `TIR2`,
+  `TSD2` — plus `sim`; the diff compares **every** column.
+- `expected_candidates.tar.gz` — `chunk{0..3}.tirvish.tsv`, the reference output in
+  that shape (handy without running `gt`).
 
 ## Usage
 
