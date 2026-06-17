@@ -365,9 +365,10 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
         let (suftab, lcptab) = {
             let (sa, lcp) = sa_lcp(&e.sa_input, e.k);
             let suftab: Vec<u32> = sa[..nsuf].iter().map(|&x| x as u32).collect();
+            drop(sa); // free the i32 SA before allocating lcptab (avoid a 4-array peak)
             let lcptab: Vec<u32> = lcp[..nsuf].iter().map(|&x| x as u32).collect();
             (suftab, lcptab)
-        }; // i32 sa/lcp freed
+        }; // i32 lcp freed
         e.sa_input = Vec::new(); // SA built; libsais text no longer needed (~T*4 B)
         enumerate_maxpairs(&suftab, &lcptab, p.seed, ALPHA, &e.enc, |len, p1, p2| {
             store_seed(
@@ -438,6 +439,11 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
                         }
                     }
                 }
+                // Sort each block's candidates HERE (in the parallel worker) so the
+                // serial drain only merges already-sorted runs (adaptive sort_by ->
+                // ~linear) instead of full-sorting the window each time. Keeps the
+                // sort work on the parallel phase, restoring CPU utilization.
+                live.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
                 (live, p0)
             })
             .collect();
