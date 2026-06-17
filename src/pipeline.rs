@@ -135,56 +135,120 @@ struct Collected {
     p0: Option<LeanPair>,
 }
 
-/// gt_tir_remove_overlaps, "best" mode (keep max-similarity per overlapping
-/// cluster), over the PRUNED candidate set.
+/// Build the output Element for one survivor pair: the six (start, stop)
+/// coordinate pairs gt emits per element, 1-based and local to the contig.
+/// Extracted so the streaming overlap sweep can emit survivors directly.
+fn make_element(pair: &LeanPair, e: &Encoded, contigs: &[(String, Vec<u8>)]) -> Element {
+    let seqstart = e.fwd_seqstart[pair.contignumber as usize];
+    // Emit the sequence id verbatim — never mutate identifiers the input carries.
+    let name = contigs[pair.contignumber as usize].0.clone();
+    // The full element is anchored on the left-arm start and the right-arm end
+    // (± one TSD); the body (no-TSD element) sits one TSD inside each end; the two
+    // TSDs flank the body.
+    let tsd = pair.tsd_length;
+    let full_start = pair.left_tir_start - seqstart - tsd + 1;
+    let full_stop = pair.right_transformed_end - seqstart + tsd + 1;
+    let body_start = full_start + tsd;
+    let body_stop = full_stop - tsd;
+    let tsd1_start = full_start;
+    let tsd1_stop = body_start - 1;
+    let tsd2_start = body_stop + 1;
+    let tsd2_stop = full_stop;
+    // The two TIR arms, each in its own coordinates. gt emits the two TIR features
+    // sorted by GtRange (start, then end), so TIR1 = the (start,end)-first arm.
+    // Post-TSD the transformed right arm can start at or before the left arm (the
+    // arms cross over when long), so sort rather than assume left-then-right.
+    let left_arm = (
+        pair.left_tir_start - seqstart + 1,
+        pair.left_tir_end - seqstart + 1,
+    );
+    let right_arm = (
+        pair.right_transformed_start - seqstart + 1,
+        pair.right_transformed_end - seqstart + 1,
+    );
+    let (tir1, tir2) = if left_arm <= right_arm {
+        (left_arm, right_arm)
+    } else {
+        (right_arm, left_arm)
+    };
+    Element {
+        seqid: name,
+        full_start,
+        full_stop,
+        tsd1_start,
+        tsd1_stop,
+        body_start,
+        body_stop,
+        tir1_start: tir1.0,
+        tir1_stop: tir1.1,
+        tir2_start: tir2.0,
+        tir2_stop: tir2.1,
+        tsd2_start,
+        tsd2_stop,
+        sim: pair.similarity,
+    }
+}
+
+/// Streaming gt_tir_remove_overlaps "best" + emission: consume the live candidates
+/// IN SORTED ORDER ((compare_tirs, seed_index)) and emit each overlap cluster's
+/// max-similarity survivor as the cluster closes, holding only O(1) state (the
+/// running reference range + the cluster's current best). Output-identical to the
+/// former `remove_overlaps_pruned` + `!skip` emit loop — and since `elements_tsv`
+/// re-sorts, emit order is irrelevant. This is the consumer that lets stage 5 run
+/// off a stream (in-memory now; an external merge later) instead of a full vec.
 ///
-/// `pairs` holds only the live (non-skipped) length-passers, sorted by
-/// (compare_tirs, seed_index). `p0` is gt's `pairs[0]` — the global-first
-/// length-passer, possibly skipped — which gt uses to seed the reference range
-/// and `maxsimboundaries` at index 0 *unconditionally* (tir_stream.c:250-253).
-///
-/// This is output-identical to running gt's algorithm over the full first_pairs
-/// array: every skipped pair at index >= 1 is `continue`d before it can touch
-/// `refrng`/`maxsim`, so it is inert and droppable; only the index-0 seed
-/// survives pruning, carried here as `p0`. When `p0` is skipped its similarity
-/// is < 80 <= every live pair's, so it can extend the initial `ref_end` but can
-/// never win the max-similarity comparison — modelled as a `None` (phantom)
-/// maxsim that the first overlapping live pair always replaces. When `p0` is
-/// live it equals `pairs[0]` (global min, present in the live set), so it seeds
-/// from index 0 and the loop starts at 1, exactly as gt does.
-fn remove_overlaps_pruned(pairs: &mut [LeanPair], p0: Option<&LeanPair>) {
+/// `p0` seeds the first cluster exactly as gt seeds maxsimboundaries at index 0:
+/// when `p0` is live it IS the first element of the stream (consumed as the initial
+/// best); when `p0` is skipped it seeds only the reference range with a phantom
+/// (None) best that the first overlapping live pair always replaces. Every element
+/// of the stream is live (the fold only retains non-skipped length-passers).
+fn stream_overlaps_emit(
+    mut iter: impl Iterator<Item = LeanPair>,
+    p0: Option<LeanPair>,
+    e: &Encoded,
+    contigs: &[(String, Vec<u8>)],
+    out: &mut Vec<Element>,
+) {
     let p0 = match p0 {
         Some(p) => p,
         None => return, // no length-passers at all
     };
     let mut ref_start = p0.left_tir_start;
     let mut ref_end = p0.right_transformed_end;
-    // maxsim: index into `pairs`, or None for the phantom skipped-p0 seed.
-    let (mut maxsim, start) = if p0.skip {
-        (None, 0usize) // p0 not in `pairs`; process every live pair
+    // best = current cluster's running max-similarity survivor; None is the phantom
+    // seed used when p0 is skipped (the first overlapping live pair replaces it).
+    let mut best: Option<LeanPair> = if p0.skip {
+        None // p0 not in the stream; process every live pair
     } else {
-        (Some(0usize), 1usize) // p0 == pairs[0]; seed from it, process the rest
+        // p0 == the global-min first element of the stream; consume it as the seed.
+        Some(iter.next().expect("live p0 implies a non-empty live stream"))
     };
-    for i in start..pairs.len() {
-        // tirboundaries_overlap(refrng, pairs[i]); all of `pairs` is live here.
-        if ref_start <= pairs[i].right_transformed_end && ref_end >= pairs[i].left_tir_start {
-            ref_end = ref_end.max(pairs[i].right_transformed_end);
-            match maxsim {
-                None => maxsim = Some(i), // phantom (skipped p0) always loses
-                Some(m) => {
-                    if double_smaller(pairs[m].similarity, pairs[i].similarity) {
-                        pairs[m].skip = true;
-                        maxsim = Some(i);
+    for cur in iter {
+        // tirboundaries_overlap(refrng, cur); every `cur` is live.
+        if ref_start <= cur.right_transformed_end && ref_end >= cur.left_tir_start {
+            ref_end = ref_end.max(cur.right_transformed_end);
+            best = match best {
+                None => Some(cur), // phantom (skipped p0) always loses
+                Some(b) => {
+                    if double_smaller(b.similarity, cur.similarity) {
+                        Some(cur) // cur strictly better; drop the old best
                     } else {
-                        pairs[i].skip = true;
+                        Some(b) // cur loses; drop it
                     }
                 }
-            }
+            };
         } else {
-            ref_start = pairs[i].left_tir_start;
-            ref_end = pairs[i].right_transformed_end;
-            maxsim = Some(i);
+            // cluster closed: emit its survivor, then start a new cluster at cur.
+            if let Some(b) = best {
+                out.push(make_element(&b, e, contigs));
+            }
+            ref_start = cur.left_tir_start;
+            ref_end = cur.right_transformed_end;
+            best = Some(cur);
         }
+    }
+    if let Some(b) = best {
+        out.push(make_element(&b, e, contigs));
     }
 }
 
@@ -321,66 +385,13 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
         });
 
     // stage 5: sort the live survivors (compare_tirs, then seed index to match the
-    // original stable full-array sort), then remove_overlaps seeded from p0.
+    // original stable full-array sort), then a STREAMING overlap-removal + emit that
+    // holds only the current cluster's running best (O(1) state) rather than the
+    // whole array. (Phase 1: still fed by the in-memory sorted vec; a later phase
+    // replaces this with an external merge so the candidates never all reside.)
     let mut live = collected.live;
     live.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
-    remove_overlaps_pruned(&mut live, collected.p0.as_ref());
-
     let mut out = Vec::new();
-    for pair in &live {
-        if pair.skip {
-            continue;
-        }
-        let seqstart = e.fwd_seqstart[pair.contignumber as usize];
-        // Emit the sequence id verbatim — never mutate identifiers the input carries.
-        let name = contigs[pair.contignumber as usize].0.clone();
-        // The six (start, stop) pairs gt emits per element, 1-based and local to
-        // the contig. The full element is anchored on the left-arm start and the
-        // right-arm end (± one TSD); the body (no-TSD element) sits one TSD inside
-        // each end; the two TSDs flank the body.
-        let tsd = pair.tsd_length;
-        let full_start = pair.left_tir_start - seqstart - tsd + 1;
-        let full_stop = pair.right_transformed_end - seqstart + tsd + 1;
-        let body_start = full_start + tsd;
-        let body_stop = full_stop - tsd;
-        let tsd1_start = full_start;
-        let tsd1_stop = body_start - 1;
-        let tsd2_start = body_stop + 1;
-        let tsd2_stop = full_stop;
-        // The two TIR arms, each in its own coordinates. gt emits the two TIR
-        // features sorted by GtRange (start, then end), so TIR1 = the (start,end)-
-        // first arm. Post-TSD the transformed right arm can start at or before the
-        // left arm (the arms cross over when long), so sort rather than assume
-        // left-then-right; when starts tie the smaller end wins.
-        let left_arm = (
-            pair.left_tir_start - seqstart + 1,
-            pair.left_tir_end - seqstart + 1,
-        );
-        let right_arm = (
-            pair.right_transformed_start - seqstart + 1,
-            pair.right_transformed_end - seqstart + 1,
-        );
-        let (tir1, tir2) = if left_arm <= right_arm {
-            (left_arm, right_arm)
-        } else {
-            (right_arm, left_arm)
-        };
-        out.push(Element {
-            seqid: name,
-            full_start,
-            full_stop,
-            tsd1_start,
-            tsd1_stop,
-            body_start,
-            body_stop,
-            tir1_start: tir1.0,
-            tir1_stop: tir1.1,
-            tir2_start: tir2.0,
-            tir2_stop: tir2.1,
-            tsd2_start,
-            tsd2_stop,
-            sim: pair.similarity,
-        });
-    }
+    stream_overlaps_emit(live.into_iter(), collected.p0, &e, contigs, &mut out);
     out
 }
