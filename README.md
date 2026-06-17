@@ -103,5 +103,20 @@ invocation: `-seed 20 -mintirlen 10 -maxtirlen 1000 -mintirdist 10 -maxtirdist
 5000 -similar 80 -mintsd 2 -maxtsd 11 -vic 13` (Xdrop scores `-mat 2 -mis -2
 -ins -3 -del -3 -xdrop 5`).
 
+### Input size: pre-fragment your genome
+
+`tirvish_rs` is built for **pre-fragmented** input — the ~5 Mbp chunks TIR-Learner's
+genomeSplitter produces — and that's the only configuration the project tests or
+ships. It builds an in-memory suffix array per input file using the 32-bit libsais
+path with `u32` SA storage (half the RAM of `u64`), so a single input file's
+*mirrored* text must stay under 2³¹ — i.e. roughly **one sequence < ~1 Gbp**. That
+ceiling is far above a genomeSplitter chunk, so the pipeline never approaches it.
+
+If you run `tirvish_rs` standalone on an unfragmented genome and a sequence is too
+large, it stops with a clear error rather than producing wrong output — split the
+input into ≤5 Mbp chunks first (e.g. with genomeSplitter). Only do this if you know
+what you're doing; the supported path is the TIR-Learner pipeline, which fragments
+for you.
+
 Per-stage validators (compare against an instrumented gt's `TIRVISH_TRACE` /
 `TIRVISH_XD` dumps): `seedcount`, `xdropcheck`, `tsdcheck`, `simcheck`.

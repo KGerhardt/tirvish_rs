@@ -273,8 +273,8 @@ struct ItvInfo {
 /// (`lcptab[0] == 0`); `n = suftab.len()` = number of non-special suffixes.
 /// `enc` = per-position left-char codes (specials == `alphabetsize`).
 pub fn enumerate_maxpairs(
-    suftab: &[u64],
-    lcptab: &[u64],
+    suftab: &[u32],
+    lcptab: &[u32],
     searchlength: u64,
     alphabetsize: u32,
     enc: &[u32],
@@ -294,12 +294,12 @@ pub fn enumerate_maxpairs(
     let mut lastinterval: Option<ItvInfo> = None;
 
     for idx in 0..n {
-        let previoussuffix = suftab[idx];
+        let previoussuffix = suftab[idx] as u64;
         // LCP is LOOK-AHEAD: lcp(suftab[idx], suftab[idx+1]) == standard
         // look-behind lcptab[idx+1] (0 past the end). This is gt's streaming
         // convention; using look-behind lcptab[idx] drops the first leaf of
         // each interval. Verified against a brute-force maximal-pairs oracle.
-        let lcpvalue = if idx + 1 < n { lcptab[idx + 1] } else { 0 };
+        let lcpvalue = if idx + 1 < n { lcptab[idx + 1] as u64 } else { 0 };
 
         if lcpvalue <= stack.last().unwrap().lcp {
             let firstedge;

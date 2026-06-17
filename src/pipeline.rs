@@ -239,10 +239,21 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
     // maxpairs), e.seqnum_of (after store_seed). Keeps the loop's peak off them.
     let mut seeds: Vec<Seed> = Vec::new();
     {
+        // tirvish_rs targets pre-fragmented input (genomeSplitter chunks, ~5 Mbp),
+        // so the mirrored text is far under the 32-bit suffix-array limit. We use
+        // the i32 libsais path and store the SA/LCP as u32 (not u64) — half the
+        // floor, and the values provably fit since the text length is < 2^31.
+        // Guard loudly rather than corrupt if someone runs a too-large sequence.
+        assert!(
+            e.sa_input.len() < i32::MAX as usize,
+            "tirvish_rs: input too large ({} bp mirrored, limit {}). It expects \
+             pre-fragmented genomes (~5 Mbp chunks); split larger sequences first.",
+            e.sa_input.len(), i32::MAX
+        );
         let (suftab, lcptab) = {
             let (sa, lcp) = sa_lcp(&e.sa_input, e.k);
-            let suftab: Vec<u64> = sa[..nsuf].iter().map(|&x| x as u64).collect();
-            let lcptab: Vec<u64> = lcp[..nsuf].iter().map(|&x| x as u64).collect();
+            let suftab: Vec<u32> = sa[..nsuf].iter().map(|&x| x as u32).collect();
+            let lcptab: Vec<u32> = lcp[..nsuf].iter().map(|&x| x as u32).collect();
             (suftab, lcptab)
         }; // i32 sa/lcp freed
         e.sa_input = Vec::new(); // SA built; libsais text no longer needed (~T*4 B)
