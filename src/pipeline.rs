@@ -129,14 +129,27 @@ fn compare_tirs(a: &LeanPair, b: &LeanPair) -> Ordering {
         .then(a.right_transformed_start.cmp(&b.right_transformed_start))
 }
 
-/// Result of the parallel per-seed pass: the live (non-skipped) length-passers,
-/// each tagged with its seed index, plus `p0` = the single global-first
-/// length-passer by (compare_tirs, seed_index) — gt's `pairs[0]`, which may
-/// itself be skipped. See [`remove_overlaps_pruned`] for why only `p0` matters.
-#[derive(Default)]
-struct Collected {
-    live: Vec<LeanPair>,
-    p0: Option<LeanPair>,
+/// Incremental, bounded-memory driver for stage 5 (sort + overlap-removal + emit).
+/// Live candidates are PUSHED roughly in `pos1` order (bounded disorder, see `run`);
+/// a sliding window holds the not-yet-safe tail, and `drain_to(watermark)` flushes
+/// every buffered candidate with `left_tir_start < watermark - disorder`, in
+/// `(compare_tirs, seed_idx)` order, through the same cluster sweep the old
+/// `remove_overlaps_pruned` did. `p0` (the global argmin over ALL length-passers,
+/// possibly skipped) is tracked as a running min via `observe_p0`; it is provably
+/// settled before the first drain emits anything, so the sweep core is seeded
+/// lazily on first emission. Output is identical to the whole-array sort +
+/// remove_overlaps + emit; the candidate set never fully resides.
+struct OverlapSweep<'a> {
+    disorder: u32,
+    win: Vec<LeanPair>,    // window buffer (unsorted between drains)
+    p0: Option<LeanPair>,  // running global argmin over all length-passers
+    seeded: bool,          // sweep core seeded (p0 settled) yet?
+    ref_start: u32,
+    ref_end: u32,
+    best: Option<LeanPair>, // current cluster's running max-similarity survivor
+    out: Vec<Element>,
+    e: &'a Encoded,
+    contigs: &'a [(String, Vec<u8>)],
 }
 
 /// Build the output Element for one survivor pair: the six (start, stop)
@@ -192,45 +205,69 @@ fn make_element(pair: &LeanPair, e: &Encoded, contigs: &[(String, Vec<u8>)]) -> 
     }
 }
 
-/// Streaming gt_tir_remove_overlaps "best" + emission: consume the live candidates
-/// IN SORTED ORDER ((compare_tirs, seed_index)) and emit each overlap cluster's
-/// max-similarity survivor as the cluster closes, holding only O(1) state (the
-/// running reference range + the cluster's current best). Output-identical to the
-/// former `remove_overlaps_pruned` + `!skip` emit loop — and since `elements_tsv`
-/// re-sorts, emit order is irrelevant. This is the consumer that lets stage 5 run
-/// off a stream (in-memory now; an external merge later) instead of a full vec.
-///
-/// `p0` seeds the first cluster exactly as gt seeds maxsimboundaries at index 0:
-/// when `p0` is live it IS the first element of the stream (consumed as the initial
-/// best); when `p0` is skipped it seeds only the reference range with a phantom
-/// (None) best that the first overlapping live pair always replaces. Every element
-/// of the stream is live (the fold only retains non-skipped length-passers).
-fn stream_overlaps_emit(
-    mut iter: impl Iterator<Item = LeanPair>,
-    p0: Option<LeanPair>,
-    e: &Encoded,
-    contigs: &[(String, Vec<u8>)],
-    out: &mut Vec<Element>,
-) {
-    let p0 = match p0 {
-        Some(p) => p,
-        None => return, // no length-passers at all
-    };
-    let mut ref_start = p0.left_tir_start;
-    let mut ref_end = p0.right_transformed_end;
-    // best = current cluster's running max-similarity survivor; None is the phantom
-    // seed used when p0 is skipped (the first overlapping live pair replaces it).
-    let mut best: Option<LeanPair> = if p0.skip {
-        None // p0 not in the stream; process every live pair
-    } else {
-        // p0 == the global-min first element of the stream; consume it as the seed.
-        Some(iter.next().expect("live p0 implies a non-empty live stream"))
-    };
-    for cur in iter {
-        // tirboundaries_overlap(refrng, cur); every `cur` is live.
-        if ref_start <= cur.right_transformed_end && ref_end >= cur.left_tir_start {
-            ref_end = ref_end.max(cur.right_transformed_end);
-            best = match best {
+impl<'a> OverlapSweep<'a> {
+    fn new(e: &'a Encoded, contigs: &'a [(String, Vec<u8>)], disorder: u32) -> Self {
+        OverlapSweep {
+            disorder, win: Vec::new(), p0: None, seeded: false,
+            ref_start: 0, ref_end: 0, best: None, out: Vec::new(), e, contigs,
+        }
+    }
+
+    /// Fold a length-passer (skipped or not) into the running global p0 = gt's pairs[0].
+    fn observe_p0(&mut self, c: LeanPair) {
+        let beats = match &self.p0 {
+            None => true,
+            Some(pp) => compare_tirs(&c, pp).then(c.seed_idx.cmp(&pp.seed_idx)).is_lt(),
+        };
+        if beats {
+            self.p0 = Some(c);
+        }
+    }
+
+    /// Buffer a live candidate in the window.
+    fn push(&mut self, c: LeanPair) {
+        self.win.push(c);
+    }
+
+    /// Flush every buffered candidate with `left_tir_start < watermark - disorder`
+    /// (safe: no future candidate, all with pos1 >= watermark, can have a smaller
+    /// left_tir_start), in (compare_tirs, seed_idx) order, through the cluster sweep.
+    fn drain_to(&mut self, watermark: u32) {
+        if self.win.is_empty() {
+            return;
+        }
+        self.win.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
+        let thresh = watermark.saturating_sub(self.disorder);
+        // left_tir_start is a global position, so it is monotonic in the
+        // (contig, left_tir_start) sort order -> a binary partition is valid.
+        let split = self.win.partition_point(|c| c.left_tir_start < thresh);
+        let drained: Vec<LeanPair> = self.win.drain(..split).collect();
+        for c in drained {
+            self.feed_core(c);
+        }
+    }
+
+    /// One candidate through the cluster sweep. Seeds the core lazily on the first
+    /// call, when p0 is provably settled (it has the global-min left_tir_start, so it
+    /// is final before anything below the first watermark is emittable). Identical
+    /// logic to the former remove_overlaps_pruned + emit.
+    fn feed_core(&mut self, cur: LeanPair) {
+        if !self.seeded {
+            let p0 = self.p0.expect("a candidate implies a length-passer => p0 set");
+            self.ref_start = p0.left_tir_start;
+            self.ref_end = p0.right_transformed_end;
+            self.seeded = true;
+            if !p0.skip {
+                // p0 == this first live candidate (global min); consume it as the seed.
+                self.best = Some(cur);
+                return;
+            }
+            // p0 skipped: phantom best (None); fall through to process `cur`.
+            self.best = None;
+        }
+        if self.ref_start <= cur.right_transformed_end && self.ref_end >= cur.left_tir_start {
+            self.ref_end = self.ref_end.max(cur.right_transformed_end);
+            self.best = match self.best {
                 None => Some(cur), // phantom (skipped p0) always loses
                 Some(b) => {
                     if double_smaller(b.similarity, cur.similarity) {
@@ -242,16 +279,22 @@ fn stream_overlaps_emit(
             };
         } else {
             // cluster closed: emit its survivor, then start a new cluster at cur.
-            if let Some(b) = best {
-                out.push(make_element(&b, e, contigs));
+            if let Some(b) = self.best {
+                self.out.push(make_element(&b, self.e, self.contigs));
             }
-            ref_start = cur.left_tir_start;
-            ref_end = cur.right_transformed_end;
-            best = Some(cur);
+            self.ref_start = cur.left_tir_start;
+            self.ref_end = cur.right_transformed_end;
+            self.best = Some(cur);
         }
     }
-    if let Some(b) = best {
-        out.push(make_element(&b, e, contigs));
+
+    /// Drain the remaining window and emit the final cluster's survivor.
+    fn finish(mut self) -> Vec<Element> {
+        self.drain_to(u32::MAX);
+        if let Some(b) = self.best {
+            self.out.push(make_element(&b, self.e, self.contigs));
+        }
+        self.out
     }
 }
 
@@ -351,52 +394,71 @@ pub fn run(contigs: &[(String, Vec<u8>)], p: &Params) -> Vec<Element> {
     // affect output is the global-first (index-0 seed); keep it separately as `p0`.
     // The seed index (via .enumerate()) reproduces the validated stable-sort tie
     // -break. Each kept candidate is projected to a compact LeanPair.
-    let collected = seeds
-        .par_iter()
-        .with_min_len(SEED_PAR_BLOCK)
-        .enumerate()
-        .fold(Collected::default, |mut acc, (i, s)| {
-            if let Some(pair) = process_seed(s, &e, &scores, &dist, p) {
-                let idx = i as u32;
-                let lean = LeanPair::from_pair(idx, &pair);
-                // p0 = argmin over ALL length-passers (skipped or not) by
-                // (compare_tirs, seed_index) = gt's pairs[0].
-                let beats = match &acc.p0 {
-                    None => true,
-                    Some(pp) => compare_tirs(&lean, pp).then(idx.cmp(&pp.seed_idx)).is_lt(),
-                };
-                if beats {
-                    acc.p0 = Some(lean);
-                }
-                if !pair.skip {
-                    acc.live.push(lean);
-                }
-            }
-            acc
-        })
-        .reduce(Collected::default, |mut a, mut b| {
-            a.live.append(&mut b.live);
-            a.p0 = match (a.p0, b.p0) {
-                (None, x) | (x, None) => x,
-                (Some(x), Some(y)) => {
-                    if compare_tirs(&x, &y).then(x.seed_idx.cmp(&y.seed_idx)).is_lt() {
-                        Some(x)
-                    } else {
-                        Some(y)
+    // Stages 2-5, STREAMED: process seeds in pos1 order via waves of parallel blocks,
+    // window-sort the candidates (bounded disorder), and run the overlap sweep
+    // incrementally so the full candidate set never resides. Faithful to the old
+    // whole-array path: each candidate carries its ORIGINAL (SA-order) index as the
+    // sort tie-break, and OverlapSweep reproduces remove_overlaps_pruned exactly.
+    //
+    // Disorder bound: left_tir_start in [pos1 - (maxtirlen+vicinity), pos1 +
+    // (vicinity+maxtsd)] -- xdrop-left <= alilen <= maxtirlen, TSD shift <= vicinity
+    // -- so a candidate is safe to emit once the watermark (min pos1 of unprocessed
+    // seeds) passes its left_tir_start by that margin.
+    let disorder = (p.max_tir_len + p.vicinity + p.max_tsd_len) as u32 + 8;
+
+    // pos1 order over the seeds, carrying the SA-order index (the stage-5 tie-break).
+    let mut order: Vec<u32> = (0..seeds.len() as u32).collect();
+    order.sort_by_key(|&i| seeds[i as usize].pos1);
+    let blocks: Vec<&[u32]> = order.chunks(SEED_PAR_BLOCK).collect();
+
+    let mut sweep = OverlapSweep::new(&e, contigs, disorder);
+    let wave = rayon::current_num_threads().max(1);
+    let mut bi = 0;
+    while bi < blocks.len() {
+        let hi = (bi + wave).min(blocks.len());
+        // Process this wave's contiguous blocks in parallel; rayon `collect`
+        // preserves block (pos1) order. Each block is serial internally.
+        let results: Vec<(Vec<LeanPair>, Option<LeanPair>)> = blocks[bi..hi]
+            .par_iter()
+            .map(|&blk| {
+                let mut live: Vec<LeanPair> = Vec::new();
+                let mut p0: Option<LeanPair> = None;
+                for &i in blk.iter() {
+                    if let Some(pair) = process_seed(&seeds[i as usize], &e, &scores, &dist, p) {
+                        let lean = LeanPair::from_pair(i, &pair); // seed_idx = SA-order index
+                        let beats = match &p0 {
+                            None => true,
+                            Some(pp) => compare_tirs(&lean, pp).then(i.cmp(&pp.seed_idx)).is_lt(),
+                        };
+                        if beats {
+                            p0 = Some(lean);
+                        }
+                        if !pair.skip {
+                            live.push(lean);
+                        }
                     }
                 }
+                (live, p0)
+            })
+            .collect();
+        // Reassemble in block order; advance the window watermark to the next block's
+        // smallest pos1 (every earlier seed is now processed).
+        for (k, (live, blk_p0)) in results.into_iter().enumerate() {
+            if let Some(pp) = blk_p0 {
+                sweep.observe_p0(pp);
+            }
+            for c in live {
+                sweep.push(c);
+            }
+            let next = bi + k + 1;
+            let watermark = if next < blocks.len() {
+                seeds[blocks[next][0] as usize].pos1
+            } else {
+                u32::MAX
             };
-            a
-        });
-
-    // stage 5: sort the live survivors (compare_tirs, then seed index to match the
-    // original stable full-array sort), then a STREAMING overlap-removal + emit that
-    // holds only the current cluster's running best (O(1) state) rather than the
-    // whole array. (Phase 1: still fed by the in-memory sorted vec; a later phase
-    // replaces this with an external merge so the candidates never all reside.)
-    let mut live = collected.live;
-    live.sort_by(|a, b| compare_tirs(a, b).then(a.seed_idx.cmp(&b.seed_idx)));
-    let mut out = Vec::new();
-    stream_overlaps_emit(live.into_iter(), collected.p0, &e, contigs, &mut out);
-    out
+            sweep.drain_to(watermark);
+        }
+        bi = hi;
+    }
+    sweep.finish()
 }
