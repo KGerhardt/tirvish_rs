@@ -13,10 +13,12 @@ use crate::params::reversepos;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Seed {
-    pub pos1: u64,
-    pub pos2: u64,
-    pub len: u64,
-    pub distance: u64,
+    // Positions index the mirrored text (< 2^31) and len <= maxtirlen, so u32 fits
+    // (16 B vs 40 B). `distance` is computed in store_seed for the filter but never
+    // read afterward, so it is not stored.
+    pub pos1: u32,
+    pub pos2: u32,
+    pub len: u32,
     pub contignumber: u32,
 }
 
@@ -58,10 +60,9 @@ pub fn store_seed(
         return;
     }
     seeds.push(Seed {
-        pos1,
-        pos2,
-        len,
-        distance,
+        pos1: pos1 as u32,
+        pos2: pos2 as u32,
+        len: len as u32,
         contignumber: seqnum1,
     });
 }

@@ -269,13 +269,15 @@ fn process_seed(
     p: &Params,
 ) -> Option<TirPair> {
     let (s1, e1, s2, e2) = e.contig_bounds(s.contignumber);
-    let alilen = p.max_tir_len - s.len;
+    // Widen the u32 seed coords back to u64 for the extension/build arithmetic.
+    let (pos1, pos2, slen) = (s.pos1 as u64, s.pos2 as u64, s.len as u64);
+    let alilen = p.max_tir_len - slen;
     let (xl, xr) = extend_seed(
-        &e.twobit, s.pos1, s.pos2, s.len, s1, e1, s2, e2, alilen, scores, dist,
+        &e.twobit, pos1, pos2, slen, s1, e1, s2, e2, alilen, scores, dist,
         p.xdrop_belowscore,
     );
     let mut pair = build_pair(
-        s.pos1, s.pos2, s.len, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
+        pos1, pos2, slen, s.contignumber, xl.ivalue, xl.jvalue, xr.ivalue, xr.jvalue,
         e.total_logical, p.min_tir_len, p.max_tir_len,
     )?;
     let seq_start = e.fwd_seqstart[s.contignumber as usize];
