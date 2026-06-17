@@ -86,31 +86,35 @@ const SEED_PAR_BLOCK: usize = 8192;
 /// Compact projection of a TirPair retained for stage 5 (sort + overlap removal +
 /// emission). Drops the compute-only fields (pos1/pos2/seed_len and the mirror
 /// coords right_tir_start/end) that stages 2-4 needed but stage 5 never reads.
-/// 64 B vs TirPair's 104 B; with ~3.67M live candidates on a shrimp chunk this is
-/// the dominant memory term. `seed_idx` carries the stable-sort tie-break.
+/// The coordinate fields are u32: every position is into the mirrored text, which
+/// is < 2^31 (the 32-bit suffix-array limit guarded in `run`), so they provably
+/// fit. ~40 B (was 64); with ~3.67M live candidates on a shrimp chunk this is the
+/// dominant memory term. `seed_idx` carries the stable-sort tie-break.
 #[derive(Clone, Copy)]
 struct LeanPair {
     seed_idx: u32,
     contignumber: u32,
-    left_tir_start: u64,
-    left_tir_end: u64,
-    right_transformed_start: u64,
-    right_transformed_end: u64,
-    tsd_length: u64,
+    left_tir_start: u32,
+    left_tir_end: u32,
+    right_transformed_start: u32,
+    right_transformed_end: u32,
+    tsd_length: u32,
     similarity: f64,
     skip: bool,
 }
 
 impl LeanPair {
     fn from_pair(seed_idx: u32, p: &TirPair) -> Self {
+        // Positions are < 2^31 (mirrored text length is guarded < i32::MAX), so the
+        // u64 -> u32 narrowing is lossless.
         LeanPair {
             seed_idx,
             contignumber: p.contignumber,
-            left_tir_start: p.left_tir_start,
-            left_tir_end: p.left_tir_end,
-            right_transformed_start: p.right_transformed_start,
-            right_transformed_end: p.right_transformed_end,
-            tsd_length: p.tsd_length,
+            left_tir_start: p.left_tir_start as u32,
+            left_tir_end: p.left_tir_end as u32,
+            right_transformed_start: p.right_transformed_start as u32,
+            right_transformed_end: p.right_transformed_end as u32,
+            tsd_length: p.tsd_length as u32,
             similarity: p.similarity,
             skip: p.skip,
         }
@@ -142,12 +146,17 @@ fn make_element(pair: &LeanPair, e: &Encoded, contigs: &[(String, Vec<u8>)]) -> 
     let seqstart = e.fwd_seqstart[pair.contignumber as usize];
     // Emit the sequence id verbatim — never mutate identifiers the input carries.
     let name = contigs[pair.contignumber as usize].0.clone();
+    // Widen the u32 coords back to u64 for the offset arithmetic against seqstart.
+    let lts = pair.left_tir_start as u64;
+    let lte = pair.left_tir_end as u64;
+    let rts = pair.right_transformed_start as u64;
+    let rte = pair.right_transformed_end as u64;
+    let tsd = pair.tsd_length as u64;
     // The full element is anchored on the left-arm start and the right-arm end
     // (± one TSD); the body (no-TSD element) sits one TSD inside each end; the two
     // TSDs flank the body.
-    let tsd = pair.tsd_length;
-    let full_start = pair.left_tir_start - seqstart - tsd + 1;
-    let full_stop = pair.right_transformed_end - seqstart + tsd + 1;
+    let full_start = lts - seqstart - tsd + 1;
+    let full_stop = rte - seqstart + tsd + 1;
     let body_start = full_start + tsd;
     let body_stop = full_stop - tsd;
     let tsd1_start = full_start;
@@ -158,14 +167,8 @@ fn make_element(pair: &LeanPair, e: &Encoded, contigs: &[(String, Vec<u8>)]) -> 
     // sorted by GtRange (start, then end), so TIR1 = the (start,end)-first arm.
     // Post-TSD the transformed right arm can start at or before the left arm (the
     // arms cross over when long), so sort rather than assume left-then-right.
-    let left_arm = (
-        pair.left_tir_start - seqstart + 1,
-        pair.left_tir_end - seqstart + 1,
-    );
-    let right_arm = (
-        pair.right_transformed_start - seqstart + 1,
-        pair.right_transformed_end - seqstart + 1,
-    );
+    let left_arm = (lts - seqstart + 1, lte - seqstart + 1);
+    let right_arm = (rts - seqstart + 1, rte - seqstart + 1);
     let (tir1, tir2) = if left_arm <= right_arm {
         (left_arm, right_arm)
     } else {
