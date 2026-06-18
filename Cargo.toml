@@ -1,6 +1,6 @@
 [package]
 name = "tirvish_rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Fast, faithful Rust port of gt tirvish (GenomeTools 1.6.5) — de-novo TIR transposon detection for TIR-Learner"

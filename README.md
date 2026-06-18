@@ -103,20 +103,32 @@ invocation: `-seed 20 -mintirlen 10 -maxtirlen 1000 -mintirdist 10 -maxtirdist
 5000 -similar 80 -mintsd 2 -maxtsd 11 -vic 13` (Xdrop scores `-mat 2 -mis -2
 -ins -3 -del -3 -xdrop 5`).
 
-### Input size: pre-fragment your genome
+### Input size: pre-fragment your genome (use genomeSplitter)
 
-`tirvish_rs` is built for **pre-fragmented** input — the ~5 Mbp chunks TIR-Learner's
-genomeSplitter produces — and that's the only configuration the project tests or
-ships. It builds an in-memory suffix array per input file using the 32-bit libsais
-path with `u32` SA storage (half the RAM of `u64`), so a single input file's
-*mirrored* text must stay under 2³¹ — i.e. roughly **one sequence < ~1 Gbp**. That
-ceiling is far above a genomeSplitter chunk, so the pipeline never approaches it.
+> **`tirvish_rs` is intended to be run on pre-fragmented input — the ~5 Mbp chunks
+> TIR-Learner's genomeSplitter produces — and that is the only configuration the
+> project tests or ships.** Run it that way.
 
-If you run `tirvish_rs` standalone on an unfragmented genome and a sequence is too
-large, it stops with a clear error rather than producing wrong output — split the
-input into ≤5 Mbp chunks first (e.g. with genomeSplitter). Only do this if you know
-what you're doing; the supported path is the TIR-Learner pipeline, which fragments
-for you.
+It builds an in-memory suffix array per input file using the 32-bit libsais path
+with `u32` SA storage (half the RAM of `u64`). The suffix array is built over the
+**mirrored** text (forward + reverse-complement ≈ 2× the sequence), so the hard
+limit is `mirrored < 2³¹` — i.e. roughly **~1 Gbp of total sequence per input file**
+(≈ 2³⁰ forward bases). **It will not work on a genome/chromosome above that
+ceiling**: any input larger than ~1 Gbp (a single chromosome, or a file whose
+contigs sum past it) **aborts with a clear error** rather than producing wrong
+output. (Note the real limit is ~1 Gbp, *well below* 2³²; it's set by the doubled
+mirrored text and the signed 32-bit suffix-array index, not by the `u32` storage.)
+
+A genomeSplitter chunk (~5 Mbp) is ~200× under the ceiling, so the TIR-Learner
+pipeline never approaches it. If you run `tirvish_rs` standalone, split anything
+large into ≤5 Mbp chunks first — the supported path is the TIR-Learner pipeline,
+which fragments for you.
+
+**Planned:** a non-optional `genomesplitter-rs` will be wired directly into
+`tirvish_rs` so that any input file larger than ~5 Mbp is split automatically
+before processing. That makes the `u32` / 32-bit path provably always safe,
+retires this size caveat, and removes the standalone foot-gun — fragmenting will
+no longer be the caller's responsibility.
 
 Per-stage validators (compare against an instrumented gt's `TIRVISH_TRACE` /
 `TIRVISH_XD` dumps): `seedcount`, `xdropcheck`, `tsdcheck`, `simcheck`.
